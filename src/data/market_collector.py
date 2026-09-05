@@ -14,7 +14,7 @@ from src.data.market_db import (
     save_buy,
     save_launch,
 )
-from src.data.trade_recorder import process_trade
+from src.data.trade_recorder import process_trade, save_trade_event
 from src.data.trade_event import extract_trade_event
 from src.data.transaction_decoder import (
     decode_create_v2_instruction,
@@ -141,7 +141,11 @@ async def process_buy(
 
         if not trade_event["is_buy"]:
             return
-
+        save_trade_event(
+            signature,
+            slot,
+            trade_event,
+        )
         result = save_buy(
             signature=signature,
             mint=trade_event["mint"],

@@ -80,17 +80,11 @@ def init_trades_table():
         )
 
 
-async def process_trade(signature, slot):
-    transaction = await fetch_transaction(signature)
-
-    if transaction is None:
-        return
-
-    trade_event = extract_trade_event(transaction)
-
-    if not trade_event:
-        return
-
+def save_trade_event(
+    signature,
+    slot,
+    trade_event,
+):
     side = "BUY" if trade_event["is_buy"] else "SELL"
 
     with get_connection() as connection:
@@ -162,6 +156,27 @@ async def process_trade(signature, slot):
     print(f"Tokens:  {trade_event['token_amount']}")
     print(f"Slot:    {slot}")
     print("=" * 70)
+
+
+async def process_trade(
+    signature,
+    slot,
+):
+    transaction = await fetch_transaction(signature)
+
+    if transaction is None:
+        return
+
+    trade_event = extract_trade_event(transaction)
+
+    if not trade_event:
+        return
+
+    save_trade_event(
+        signature,
+        slot,
+        trade_event,
+    )
 
 
 init_trades_table()

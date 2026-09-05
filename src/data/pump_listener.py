@@ -1,4 +1,5 @@
 import asyncio
+from inspect import signature
 import json
 import os
 import ssl
@@ -7,6 +8,7 @@ import certifi
 import websockets
 from dotenv import load_dotenv
 
+from src.data.transaction_decoder import decode_transaction
 
 # Load API credentials from .env
 load_dotenv()
@@ -88,18 +90,21 @@ async def listen_to_pump():
                     creation_logs = [
                         log
                         for log in logs
-                        if "Instruction: Create" in log
+                        if "Instruction: CreateV2" in log
                     ]
 
                     if not creation_logs:
                         continue
-
                     print()
-                    print("🚨 POSSIBLE NEW PUMP.FUN TOKEN")
+                    print("🚨 NEW PUMP.FUN LAUNCH DETECTED")
                     print(f"Slot:      {slot}")
                     print(f"Signature: {signature}")
-                    print(f"Event:     {creation_logs[0]}")
                     print("-" * 60)
+
+                    asyncio.create_task(
+                        decode_transaction(signature)
+                    )
+                    
 
         except asyncio.CancelledError:
             raise

@@ -2,6 +2,10 @@ import sqlite3
 import time
 from pathlib import Path
 
+from src.data.coverage import (
+    interval_is_covered,
+    load_valid_coverage,
+)
 
 DB_PATH = Path("logs/delve_meme.db")
 
@@ -60,6 +64,27 @@ def init_outcomes_table():
             )
             """
         )
+        existing_columns = {
+            row["name"]
+            for row in connection.execute(
+                """
+                PRAGMA table_info(buy_outcomes)
+                """
+            ).fetchall()
+        }
+
+        for column in (
+            "eligible_5m",
+            "eligible_15m",
+            "eligible_1h",
+        ):
+            if column not in existing_columns:
+                connection.execute(
+                    f"""
+                    ALTER TABLE buy_outcomes
+                    ADD COLUMN {column} INTEGER
+                    """
+                )
 
         connection.execute(
             """
@@ -144,7 +169,7 @@ def first_multiple_time(
 
 def rebuild_outcomes():
     init_outcomes_table()
-
+    coverage_rows = load_valid_coverage()
     with get_connection() as connection:
 
         validated_buys = connection.execute(
@@ -180,7 +205,23 @@ def rebuild_outcomes():
 
             if entry_price is None:
                 continue
+            eligible_5m = interval_is_covered(
+                entry["trade_timestamp"],
+                entry["trade_timestamp"] + 300,
+                coverage_rows,
+            )
 
+            eligible_15m = interval_is_covered(
+                entry["trade_timestamp"],
+                entry["trade_timestamp"] + 900,
+                coverage_rows,
+            )
+
+            eligible_1h = interval_is_covered(
+                entry["trade_timestamp"],
+                entry["trade_timestamp"] + 3600,
+                coverage_rows,
+            )
             later_trades = connection.execute(
                 """
                 SELECT
@@ -237,22 +278,34 @@ def rebuild_outcomes():
                 entry["trade_timestamp"] + HORIZONS["1m"],
             )
 
-            peak_5m = calculate_peak_multiple(
-                entry_price,
-                later_trades,
-                entry["trade_timestamp"] + HORIZONS["5m"],
+            peak_5m = (
+                calculate_peak_multiple(
+                    entry_price,
+                    later_trades,
+                    entry["trade_timestamp"] + HORIZONS["5m"],
+                )
+                if eligible_5m
+                else None
             )
 
-            peak_15m = calculate_peak_multiple(
-                entry_price,
-                later_trades,
-                entry["trade_timestamp"] + HORIZONS["15m"],
+            peak_15m = (
+                calculate_peak_multiple(
+                    entry_price,
+                    later_trades,
+                    entry["trade_timestamp"] + HORIZONS["15m"],
+                )
+                if eligible_15m
+                else None
             )
 
-            peak_1h = calculate_peak_multiple(
-                entry_price,
-                later_trades,
-                entry["trade_timestamp"] + HORIZONS["1h"],
+            peak_1h = (
+                calculate_peak_multiple(
+                    entry_price,
+                    later_trades,
+                    entry["trade_timestamp"] + HORIZONS["1h"],
+                )
+                if eligible_1h
+                else None
             )
 
             time_to_2x = first_multiple_time(
@@ -294,6 +347,9 @@ def rebuild_outcomes():
                     entry_quote_amount,
                     entry_token_amount,
                     entry_price_raw,
+                    eligible_5m,
+                    eligible_15m,
+                    eligible_1h,
                     peak_multiple_1m,
                     peak_multiple_5m,
                     peak_multiple_15m,
@@ -308,8 +364,8 @@ def rebuild_outcomes():
                     updated_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -323,6 +379,9 @@ def rebuild_outcomes():
                     entry["quote_amount"],
                     entry["token_amount"],
                     entry_price,
+                    int(eligible_5m),
+                    int(eligible_15m),
+                    int(eligible_1h),
                     peak_1m,
                     peak_5m,
                     peak_15m,

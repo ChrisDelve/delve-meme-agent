@@ -8,6 +8,12 @@ import certifi
 import websockets
 from dotenv import load_dotenv
 
+from src.data.coverage import (
+    close_coverage_interval,
+    invalidate_stale_intervals,
+    start_coverage_interval,
+)
+
 from src.data.market_db import (
     get_counts,
     init_db,
@@ -273,6 +279,7 @@ def process_buy_event(
     print("=" * 70)
 async def listen():
     init_db()
+    invalidate_stale_intervals()
 
     counts = get_counts()
 
@@ -292,6 +299,9 @@ async def listen():
     print("=" * 70)
 
     while True:
+        coverage_interval_id = None
+        coverage_last_seen_at = None
+
         try:
             async with websockets.connect(
                 WS_URL,
@@ -329,6 +339,14 @@ async def listen():
                         response["error"]
                     )
 
+                coverage_interval_id = (
+                    start_coverage_interval()
+                )
+
+                coverage_last_seen_at = int(
+                    time.time()
+                )
+
                 print()
                 print("✅ Connected to Solana")
                 print("✅ Collector is learning")
@@ -338,7 +356,9 @@ async def listen():
                     payload = json.loads(
                         message
                     )
-
+                    coverage_last_seen_at = int(
+                        time.time()
+                    )
                     params = payload.get(
                         "params"
                     )
@@ -403,11 +423,29 @@ async def listen():
                                 slot,
                                 trade_event,
                             )
+                close_coverage_interval(
+                    coverage_interval_id,
+                    "websocket_closed",
+                    coverage_last_seen_at,
+                )
 
+                coverage_interval_id = None
         except asyncio.CancelledError:
+            close_coverage_interval(
+                coverage_interval_id,
+                "cancelled",
+                coverage_last_seen_at,
+            )
+
             raise
 
         except Exception as error:
+            close_coverage_interval(
+                coverage_interval_id,
+                "connection_error",
+                coverage_last_seen_at,
+            )
+
             print()
             print(
                 f"⚠️ Collector error: {error}"

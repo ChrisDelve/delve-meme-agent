@@ -184,3 +184,23 @@ def extract_trade_event(transaction):
                 return event
 
     return None
+
+def extract_trade_event_from_logs(logs):
+    for log in logs:
+
+        if not log.startswith("Program data: "):
+            continue
+
+        encoded = log.removeprefix("Program data: ")
+
+        try:
+            raw = base64.b64decode(encoded)
+        except Exception:
+            continue
+
+        event = decode_trade_event_bytes(raw)
+
+        if event:
+            return event
+
+    return None

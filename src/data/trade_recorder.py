@@ -85,10 +85,14 @@ def save_trade_event(
     slot,
     trade_event,
 ):
-    side = "BUY" if trade_event["is_buy"] else "SELL"
+    side = (
+        "BUY"
+        if trade_event["is_buy"]
+        else "SELL"
+    )
 
     with get_connection() as connection:
-        connection.execute(
+        cursor = connection.execute(
             """
             INSERT OR IGNORE INTO trades (
                 signature,
@@ -143,8 +147,16 @@ def save_trade_event(
             ),
         )
 
+        inserted = cursor.rowcount > 0
+
+    if not inserted:
+        return
+
     print()
-    print(f"{'🟢' if side == 'BUY' else '🔴'} TRADE SAVED")
+    print(
+        f"{'🟢' if side == 'BUY' else '🔴'} "
+        f"TRADE SAVED"
+    )
     print("=" * 70)
     print(f"Side:    {side}")
     print(f"Wallet:  {trade_event['user']}")
@@ -162,6 +174,11 @@ async def process_trade(
     signature,
     slot,
 ):
+    """
+    Legacy RPC fallback.
+    Normal collector flow should use save_trade_event()
+    directly from WebSocket logs.
+    """
     transaction = await fetch_transaction(signature)
 
     if transaction is None:

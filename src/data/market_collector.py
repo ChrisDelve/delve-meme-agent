@@ -14,8 +14,12 @@ from src.data.market_db import (
     save_buy,
     save_launch,
 )
-from src.data.trade_recorder import process_trade, save_trade_event
-from src.data.trade_event import extract_trade_event
+from src.data.trade_event import (
+    extract_trade_event,
+    extract_trade_event_from_logs,
+)
+
+from src.data.trade_recorder import save_trade_event
 from src.data.transaction_decoder import (
     decode_create_v2_instruction,
     fetch_transaction,
@@ -208,7 +212,65 @@ async def process_buy(
         )
         print("=" * 70)
 
+def process_buy_event(
+    signature,
+    slot,
+    trade_event,
+):
+    result = save_buy(
+        signature=signature,
+        mint=trade_event["mint"],
+        buyer=trade_event["user"],
+        quote_mint=trade_event["quote_mint"],
+        slot=slot,
+        trade_timestamp=trade_event["timestamp"],
+        sol_amount_lamports=trade_event["sol_amount"],
+        quote_amount=trade_event["quote_amount"],
+        token_amount=trade_event["token_amount"],
+        protocol_fee_lamports=trade_event["fee"],
+        creator_fee_lamports=trade_event["creator_fee"],
+        ix_name=trade_event["ix_name"],
+        mayhem_mode=trade_event["mayhem_mode"],
+        observed_at=int(time.time()),
+    )
 
+    if not result:
+        return
+
+    rank = result["observed_rank"]
+    entry_age = result["entry_age_seconds"]
+
+    print()
+    print("🦍 BUY SAVED")
+    print("=" * 70)
+    print(f"Wallet:    {trade_event['user']}")
+    print(f"Mint:      {trade_event['mint']}")
+    print(
+        f"SOL:       "
+        f"{trade_event['sol_amount'] / 1_000_000_000:.6f}"
+    )
+
+    if rank is None:
+        print("Rank:      waiting for launch record")
+    else:
+        print(f"Rank:      #{rank}")
+
+    if entry_age is None:
+        print("Entry Age: waiting for launch record")
+    else:
+        print(f"Entry Age: {entry_age} sec")
+
+    print(f"Mayhem:    {trade_event['mayhem_mode']}")
+
+    counts = get_counts()
+
+    print()
+    print(
+        f"DB → {counts['launches']} launches | "
+        f"{counts['buys']} buys | "
+        f"{counts['wallets']} wallets"
+    )
+    print("=" * 70)
 async def listen():
     init_db()
 
@@ -317,35 +379,30 @@ async def listen():
                         in log
                         for log in logs
                     )
-                    is_buy = any(
-                        (
-                            "Instruction: BuyV2" in log
-                            or
-                            "Instruction: BuyExactQuoteInV2" in log
-                        )
-                        for log in logs
-                    )
-
-                    is_sell = any(
-                        "Instruction: SellV2" in log
-                        for log in logs
-                    )
-
-                    if is_sell:
+                    if is_create:
                         asyncio.create_task(
-                            process_trade(
+                            process_launch(
                                 signature,
                                 slot,
                             )
                         )
+                    trade_event = extract_trade_event_from_logs(
+                        logs
+                    )
 
-                    if is_buy:
-                        asyncio.create_task(
-                            process_buy(
+                    if trade_event:
+                        save_trade_event(
+                            signature,
+                            slot,
+                            trade_event,
+                        )
+
+                        if trade_event["is_buy"]:
+                            process_buy_event(
                                 signature,
                                 slot,
+                                trade_event,
                             )
-                        )
 
         except asyncio.CancelledError:
             raise

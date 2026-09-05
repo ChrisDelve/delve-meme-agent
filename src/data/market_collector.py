@@ -14,6 +14,7 @@ from src.data.market_db import (
     save_buy,
     save_launch,
 )
+from src.data.trade_recorder import process_trade
 from src.data.trade_event import extract_trade_event
 from src.data.transaction_decoder import (
     decode_create_v2_instruction,
@@ -312,21 +313,23 @@ async def listen():
                         in log
                         for log in logs
                     )
-
                     is_buy = any(
                         (
-                            "Instruction: BuyV2"
-                            in log
+                            "Instruction: BuyV2" in log
                             or
-                            "Instruction: BuyExactQuoteInV2"
-                            in log
+                            "Instruction: BuyExactQuoteInV2" in log
                         )
                         for log in logs
                     )
 
-                    if is_create:
+                    is_sell = any(
+                        "Instruction: SellV2" in log
+                        for log in logs
+                    )
+
+                    if is_sell:
                         asyncio.create_task(
-                            process_launch(
+                            process_trade(
                                 signature,
                                 slot,
                             )

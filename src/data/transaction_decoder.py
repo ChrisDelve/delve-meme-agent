@@ -3,6 +3,7 @@ import hashlib
 import os
 import ssl
 import sys
+import time
 
 import aiohttp
 import base58
@@ -22,6 +23,27 @@ if not HELIUS_API_KEY:
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+RPC_MIN_INTERVAL_SECONDS = 0.25
+
+_rpc_lock = asyncio.Lock()
+_last_rpc_request = 0.0
+
+
+async def wait_for_rpc_slot():
+    global _last_rpc_request
+
+    async with _rpc_lock:
+        now = time.monotonic()
+
+        wait_time = (
+            RPC_MIN_INTERVAL_SECONDS
+            - (now - _last_rpc_request)
+        )
+
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+
+        _last_rpc_request = time.monotonic()
 
 # Anchor instruction discriminator:
 # first 8 bytes of sha256("global:create_v2")
@@ -119,32 +141,110 @@ async def fetch_transaction(signature: str):
         ],
     }
 
-    connector = aiohttp.TCPConnector(ssl=SSL_CONTEXT)
+    connector = aiohttp.TCPConnector(
+        ssl=SSL_CONTEXT
+    )
+
+    backoff_seconds = 1.0
 
     async with aiohttp.ClientSession(
         connector=connector
     ) as session:
 
-        # A transaction detected at "processed" may need a moment
-        # before it becomes available at "confirmed".
         for attempt in range(10):
 
-            async with session.post(
-                RPC_URL,
-                json=payload
-            ) as response:
+            await wait_for_rpc_slot()
 
-                response.raise_for_status()
-                result = await response.json()
+            try:
+                async with session.post(
+                    RPC_URL,
+                    json=payload
+                ) as response:
+
+                    if response.status == 429:
+                        retry_after = response.headers.get(
+                            "Retry-After"
+                        )
+
+                        try:
+                            delay = float(retry_after)
+                        except (TypeError, ValueError):
+                            delay = backoff_seconds
+
+                        delay = min(
+                            max(delay, 1.0),
+                            8.0,
+                        )
+
+                        print(
+                            f"⏳ Helius busy — "
+                            f"backing off {delay:.1f}s"
+                        )
+
+                        await asyncio.sleep(delay)
+
+                        backoff_seconds = min(
+                            backoff_seconds * 2,
+                            8.0,
+                        )
+
+                        continue
+
+                    if response.status >= 500:
+                        await asyncio.sleep(
+                            backoff_seconds
+                        )
+
+                        backoff_seconds = min(
+                            backoff_seconds * 2,
+                            8.0,
+                        )
+
+                        continue
+
+                    if response.status != 200:
+                        body = await response.text()
+
+                        raise RuntimeError(
+                            f"Helius HTTP "
+                            f"{response.status}: "
+                            f"{body[:200]}"
+                        )
+
+                    result = await response.json()
+
+            except aiohttp.ClientError as error:
+
+                if attempt == 9:
+                    raise RuntimeError(
+                        "Helius network request failed: "
+                        f"{type(error).__name__}"
+                    ) from error
+
+                await asyncio.sleep(
+                    backoff_seconds
+                )
+
+                backoff_seconds = min(
+                    backoff_seconds * 2,
+                    8.0,
+                )
+
+                continue
 
             if "error" in result:
-                raise RuntimeError(result["error"])
+                raise RuntimeError(
+                    f"Helius RPC error: "
+                    f"{result['error']}"
+                )
 
             transaction = result.get("result")
 
             if transaction is not None:
                 return transaction
 
+            # Newly observed transactions can take a moment
+            # to reach confirmed commitment.
             await asyncio.sleep(0.5)
 
     return None

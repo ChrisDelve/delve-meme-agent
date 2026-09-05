@@ -10,7 +10,7 @@ import websockets
 from dotenv import load_dotenv
 
 from src.data.transaction_decoder import fetch_transaction
-
+from src.data.trade_event import extract_trade_event
 
 load_dotenv()
 
@@ -244,22 +244,47 @@ async def run_probe():
 
             if not decoded:
                 continue
+            trade_event = extract_trade_event(transaction)    
 
             print()
-            print("🦍 APE DETECTED")
+            print("🦍 EXECUTED APE")
             print("=" * 70)
             print(f"Buyer:       {decoded['buyer']}")
             print(f"Mint:        {decoded['mint']}")
             print(f"Quote Mint:  {decoded['quote_mint']}")
             print(f"Instruction: {decoded['type']}")
 
-            if decoded["type"] == "BuyExactQuoteInV2":
-                print(f"SOL Budget:  {decoded['quote_limit']} lamports")
-                print(f"Min Tokens:  {decoded['base_amount']} base units")
+            if trade_event and trade_event["is_buy"]:
+
+                actual_sol = trade_event["sol_amount"] / 1_000_000_000
+                protocol_fee_sol = trade_event["fee"] / 1_000_000_000
+                creator_fee_sol = trade_event["creator_fee"] / 1_000_000_000
+
+                print()
+                print("✅ ACTUAL ON-CHAIN FILL")
+                print(f"SOL Spent:      {actual_sol:.9f} SOL")
+                print(f"Tokens Received:{trade_event['token_amount']} base units")
+                print(f"Protocol Fee:   {protocol_fee_sol:.9f} SOL")
+                print(f"Creator Fee:    {creator_fee_sol:.9f} SOL")
+                print(f"Timestamp:      {trade_event['timestamp']}")
+                print(f"Event Buyer:    {trade_event['user']}")
+                print(f"Event Mint:     {trade_event['mint']}")
+                print(f"Event Type:     {trade_event['ix_name']}")
+                print(f"Mayhem:         {trade_event['mayhem_mode']}")
+
             else:
-                print(f"Tokens Req:  {decoded['base_amount']} base units")
-                print(f"Max Cost:    {decoded['quote_limit']} quote units")
-            
+                print()
+                print("⚠️ TradeEvent not decoded.")
+                print("Showing requested order parameters instead:")
+
+                if decoded["type"] == "BuyExactQuoteInV2":
+                    print(f"SOL Budget:  {decoded['quote_limit']} lamports")
+                    print(f"Min Tokens:  {decoded['base_amount']} base units")
+                else:
+                    print(f"Tokens Req:  {decoded['base_amount']} base units")
+                    print(f"Max Cost:    {decoded['quote_limit']} quote units")
+
+            print()
             print(f"Signature:   {signature}")
             print("=" * 70)
 

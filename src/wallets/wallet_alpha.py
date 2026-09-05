@@ -21,16 +21,16 @@ PRIOR_STRENGTH = 20.0
 
 HORIZONS = {
     "5m": {
-        "seconds": 300,
         "column": "peak_multiple_5m",
+        "eligible_column": "eligible_5m",
     },
     "15m": {
-        "seconds": 900,
         "column": "peak_multiple_15m",
+        "eligible_column": "eligible_15m",
     },
     "1h": {
-        "seconds": 3600,
         "column": "peak_multiple_1h",
+        "eligible_column": "eligible_1h",
     },
 }
 
@@ -151,18 +151,20 @@ def load_first_entries():
                 entry_rank,
                 entry_age_seconds,
 
+                eligible_5m,
+                eligible_15m,
+                eligible_1h,
+
                 peak_multiple_5m,
                 peak_multiple_15m,
-                peak_multiple_1h,
-
-                latest_trade_timestamp
+                peak_multiple_1h
 
             FROM buy_outcomes
 
             WHERE
                 entry_age_seconds IS NOT NULL
                 AND entry_timestamp IS NOT NULL
-                AND latest_trade_timestamp IS NOT NULL
+                
 
             ORDER BY
                 buyer ASC,
@@ -194,16 +196,12 @@ def is_horizon_eligible(
     entry,
     horizon_name,
 ):
-    horizon = HORIZONS[horizon_name]
-
-    required_end = (
-        entry["entry_timestamp"]
-        + horizon["seconds"]
-    )
+    eligibility_column = HORIZONS[
+        horizon_name
+    ]["eligible_column"]
 
     return (
-        entry["latest_trade_timestamp"]
-        >= required_end
+        entry[eligibility_column] == 1
     )
 
 
@@ -464,10 +462,12 @@ def evaluate_wallet(
 
     distinct_mints = len(entries)
 
-    # Reputation confidence increases with
-    # independent token observations.
+    eligible_15m = metrics[
+        "eligible_15m"
+    ]
+
     confidence = clamp(
-        distinct_mints
+        eligible_15m
         / MIN_ESTABLISHED_MINTS,
         0.0,
         1.0,
@@ -481,16 +481,10 @@ def evaluate_wallet(
         ) * confidence
     )
 
-    if (
-        distinct_mints
-        < MIN_PROVISIONAL_MINTS
-    ):
+    if eligible_15m < MIN_PROVISIONAL_MINTS:
         status = "DISCOVERY"
 
-    elif (
-        distinct_mints
-        < MIN_ESTABLISHED_MINTS
-    ):
+    elif eligible_15m < MIN_ESTABLISHED_MINTS:
         status = "PROVISIONAL"
 
     else:

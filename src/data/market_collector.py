@@ -35,6 +35,9 @@ from src.data.transaction_decoder import (
     fetch_transaction,
 )
 
+from src.strategies.model_shadow_signals import (
+    record_model_shadow_prediction,
+)
 
 load_dotenv()
 
@@ -190,6 +193,9 @@ async def process_buy(
             slot,
             trade_event,
         )
+
+        observed_at = int(time.time())
+
         result = save_buy(
             signature=signature,
             mint=trade_event["mint"],
@@ -207,7 +213,7 @@ async def process_buy(
             creator_fee_lamports=trade_event["creator_fee"],
             ix_name=trade_event["ix_name"],
             mayhem_mode=trade_event["mayhem_mode"],
-            observed_at=int(time.time()),
+            observed_at=observed_at,
         )
 
         # Duplicate transaction already saved.
@@ -257,6 +263,7 @@ def process_buy_event(
     slot,
     trade_event,
 ):
+    observed_at = int(time.time())
     result = save_buy(
         signature=signature,
         mint=trade_event["mint"],
@@ -271,7 +278,7 @@ def process_buy_event(
         creator_fee_lamports=trade_event["creator_fee"],
         ix_name=trade_event["ix_name"],
         mayhem_mode=trade_event["mayhem_mode"],
-        observed_at=int(time.time()),
+        observed_at=observed_at,
     )
 
     if not result:
@@ -279,6 +286,23 @@ def process_buy_event(
 
     rank = result["observed_rank"]
     entry_age = result["entry_age_seconds"]
+
+    try:
+        record_model_shadow_prediction(
+            signature=signature,
+            slot=slot,
+            wallet=trade_event["user"],
+            mint=trade_event["mint"],
+            quote_mint=trade_event["quote_mint"],
+            trade_timestamp=trade_event["timestamp"],
+            mayhem_mode=trade_event["mayhem_mode"],
+            observed_at=observed_at,
+        )
+    except Exception as error:
+        print(
+            "⚠️ MODEL SHADOW ERROR | "
+            f"{type(error).__name__}: {error}"
+        )
 
     shadow_signal = record_shadow_signal(
         signature=signature,

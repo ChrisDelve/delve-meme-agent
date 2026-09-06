@@ -397,7 +397,19 @@ def process_buy_event(
                         "creator_fee"
                     ]
                 ),
-            )
+
+                event_protocol_fee_bps=(
+                    trade_event[
+                        "fee_basis_points"
+                    ]
+                ),
+
+                event_creator_fee_bps=(
+                    trade_event[
+                        "creator_fee_basis_points"
+                    ]
+                ),
+                )
 
         except Exception as error:
             print(

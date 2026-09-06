@@ -13,9 +13,11 @@ from src.execution.execution_quality_gate import (
 from src.execution.live_curve_state import (
     resolve_live_pump_curve_state,
 )
+
 from src.execution.live_fee_resolver import (
-    resolve_observed_fee_bps,
+    resolve_live_event_fee_bps,
 )
+
 from src.safety.token_safety_gate import (
     PASS as SAFETY_PASS,
     resolve_and_gate,
@@ -604,6 +606,10 @@ async def run_candidate(
     quote_amount: int,
     protocol_fee_lamports: int | None,
     creator_fee_lamports: int | None,
+
+    event_protocol_fee_bps: int | None,
+    event_creator_fee_bps: int | None,
+
     scheduled_at: float,
 ) -> None:
 
@@ -704,19 +710,31 @@ async def run_candidate(
             fee_status,
             protocol_fee_bps,
             creator_fee_bps,
-        ) = resolve_observed_fee_bps(
+        ) = resolve_live_event_fee_bps(
             quote_amount=int(
                 quote_amount
             ),
+
             protocol_fee_lamports=(
                 protocol_fee_lamports
             ),
+
             creator_fee_lamports=(
                 creator_fee_lamports
             ),
+
+            event_protocol_fee_bps=(
+                event_protocol_fee_bps
+            ),
+
+            event_creator_fee_bps=(
+                event_creator_fee_bps
+            ),
         )
 
-        if fee_status != "RESOLVED":
+        if not fee_status.startswith(
+            "RESOLVED"
+        ):
             record = make_record(
                 entry_signature=(
                     entry_signature
@@ -1211,6 +1229,8 @@ def schedule_pretrade_shadow_candidate(
     quote_amount: int,
     protocol_fee_lamports: int | None,
     creator_fee_lamports: int | None,
+    event_protocol_fee_bps: int | None,
+    event_creator_fee_bps: int | None,
 ) -> bool:
     """
     Very fast synchronous admission function.
@@ -1303,6 +1323,14 @@ def schedule_pretrade_shadow_candidate(
             ),
             creator_fee_lamports=(
                 creator_fee_lamports
+            ),
+
+            event_protocol_fee_bps=(
+                event_protocol_fee_bps
+            ),
+
+            event_creator_fee_bps=(
+                event_creator_fee_bps
             ),
             scheduled_at=(
                 scheduled_at

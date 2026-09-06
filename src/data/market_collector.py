@@ -8,6 +8,10 @@ import certifi
 import websockets
 from dotenv import load_dotenv
 
+from src.strategies.shadow_signals import (
+    record_shadow_signal,
+)
+
 from src.data.coverage import (
     close_coverage_interval,
     invalidate_stale_intervals,
@@ -245,6 +249,34 @@ def process_buy_event(
 
     rank = result["observed_rank"]
     entry_age = result["entry_age_seconds"]
+
+    shadow_signal = record_shadow_signal(
+        signature=signature,
+        slot=slot,
+        wallet=trade_event["user"],
+        mint=trade_event["mint"],
+        quote_mint=trade_event["quote_mint"],
+        trade_timestamp=trade_event["timestamp"],
+        sol_amount_lamports=trade_event["sol_amount"],
+        token_amount=trade_event["token_amount"],
+        observed_rank=rank,
+        entry_age_seconds=entry_age,
+        mayhem_mode=trade_event["mayhem_mode"],
+    )
+
+    if shadow_signal is not None:
+        print()
+        print("👻 SHADOW SIGNAL")
+        print(
+            f"Wallet: {shadow_signal['wallet']}"
+        )
+        print(
+            f"Mint:   {shadow_signal['mint']}"
+        )
+        print(
+            "Frozen Alpha: "
+            f"{shadow_signal['alpha_score']:.2f}"
+        )
 
     print()
     print("🦍 BUY SAVED")

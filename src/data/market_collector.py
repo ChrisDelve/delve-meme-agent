@@ -328,6 +328,10 @@ def process_buy_event(
                     trade_event["mint"]
                 ),
 
+                event_user=(
+                    trade_event["user"]
+                ),
+
                 quote_mint=(
                     trade_event["quote_mint"]
                 ),

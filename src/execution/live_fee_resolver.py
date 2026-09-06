@@ -4,6 +4,10 @@ from src.execution.pump_execution_simulator import (
     ceil_fee,
 )
 
+MAYHEM_AGENT_WALLET = (
+    "BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s"
+)
+
 BPS_DENOMINATOR = 10_000
 MAX_INFERRED_FEE_BPS = 10_000
 
@@ -121,6 +125,7 @@ def resolve_observed_fee_bps(
         creator_fee_lamports: int | None,
         event_protocol_fee_bps: int | None,
         event_creator_fee_bps: int | None,
+        event_user: str | None,
     ) -> tuple[
         str,
         int | None,
@@ -137,6 +142,19 @@ def resolve_observed_fee_bps(
 
         Fail closed on any contradiction.
         """
+
+
+        #
+        # Pump's Mayhem agent has special fee treatment.
+        # Its observed fee regime is not applicable to
+        # our hypothetical/live wallet.
+        #
+        if event_user == MAYHEM_AGENT_WALLET:
+            return (
+                "SPECIAL_MAYHEM_AGENT_FEE_NOT_APPLICABLE",
+                None,
+                None,
+            )
 
         if quote_amount <= 0:
             return (

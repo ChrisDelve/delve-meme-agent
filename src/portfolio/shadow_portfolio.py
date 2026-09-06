@@ -102,6 +102,8 @@ class ShadowMarkResult:
     mint: str
 
     tokens_held: int
+    entry_timestamp: int | None
+    entry_wallet_cost_lamports: int | None
 
     mark_value_lamports: int
     unrealized_pnl_lamports: int
@@ -1900,6 +1902,10 @@ def mark_open_position(
                 position_id=None,
                 mint=mint,
                 tokens_held=0,
+
+                entry_timestamp=None,
+                entry_wallet_cost_lamports=None,
+
                 mark_value_lamports=0,
                 unrealized_pnl_lamports=0,
                 sell_simulation=None,
@@ -2052,6 +2058,18 @@ def mark_open_position(
 
             tokens_held=(
                 tokens_held
+            ),
+
+            entry_timestamp=int(
+                position[
+                    "entry_timestamp"
+                ]
+            ),
+
+            entry_wallet_cost_lamports=int(
+                position[
+                    "entry_wallet_cost_lamports"
+                ]
             ),
 
             mark_value_lamports=(

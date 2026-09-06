@@ -114,6 +114,33 @@ class ShadowMarkResult:
         ShadowAccountSnapshot | None
     )
 
+@dataclass(frozen=True)
+class ShadowCloseResult:
+    status: str
+    reasons: tuple[str, ...]
+
+    position_id: int | None
+    mint: str
+
+    exit_reason: str | None
+
+    tokens_sold: int
+
+    gross_quote_lamports: int
+    net_proceeds_lamports: int
+    realized_pnl_lamports: int
+
+    sell_simulation: (
+        PumpSellSimulation | None
+    )
+
+    account_before: (
+        ShadowAccountSnapshot | None
+    )
+
+    account_after: (
+        ShadowAccountSnapshot | None
+    )
 
 def utc_day_key(
     timestamp: float | None = None,
@@ -1284,6 +1311,539 @@ def open_shadow_position(
     finally:
         connection.close()
 
+def close_shadow_position(
+    *,
+    mint: str,
+    exit_reason: str,
+
+    curve_state: PumpCurveState,
+
+    protocol_fee_bps: int,
+    creator_fee_bps: int,
+
+    slippage_bps: int,
+    base_network_fee_lamports: int,
+    priority_fee_lamports: int,
+
+    exit_timestamp: int | None = None,
+
+    db_path: Path = DB_PATH,
+) -> ShadowCloseResult:
+
+    if not exit_reason.strip():
+        raise ValueError(
+            "exit_reason must not be empty."
+        )
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        ensure_account(
+            connection
+        )
+
+        account_before = (
+            refresh_account(
+                connection
+            )
+        )
+
+        position = connection.execute(
+            """
+            SELECT *
+            FROM shadow_positions
+            WHERE mint = ?
+              AND status = 'OPEN'
+            LIMIT 1
+            """,
+            (
+                mint,
+            ),
+        ).fetchone()
+
+        if position is None:
+            connection.commit()
+
+            return ShadowCloseResult(
+                status="NO_POSITION",
+                reasons=(),
+
+                position_id=None,
+                mint=mint,
+
+                exit_reason=None,
+
+                tokens_sold=0,
+
+                gross_quote_lamports=0,
+                net_proceeds_lamports=0,
+                realized_pnl_lamports=0,
+
+                sell_simulation=None,
+
+                account_before=(
+                    account_before
+                ),
+
+                account_after=(
+                    account_before
+                ),
+            )
+
+        tokens_held = int(
+            position[
+                "tokens_held"
+            ]
+        )
+
+        if tokens_held <= 0:
+            connection.rollback()
+
+            return ShadowCloseResult(
+                status="UNKNOWN",
+                reasons=(
+                    "OPEN_POSITION_HAS_NO_TOKENS",
+                ),
+
+                position_id=int(
+                    position["id"]
+                ),
+
+                mint=mint,
+
+                exit_reason=(
+                    exit_reason
+                ),
+
+                tokens_sold=0,
+
+                gross_quote_lamports=0,
+                net_proceeds_lamports=0,
+                realized_pnl_lamports=0,
+
+                sell_simulation=None,
+
+                account_before=(
+                    account_before
+                ),
+
+                account_after=None,
+            )
+
+        simulation = (
+            calculate_exact_input_sell(
+                state=curve_state,
+
+                tokens_in=(
+                    tokens_held
+                ),
+
+                protocol_fee_bps=int(
+                    protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    creator_fee_bps
+                ),
+
+                slippage_bps=int(
+                    slippage_bps
+                ),
+
+                base_network_fee_lamports=int(
+                    base_network_fee_lamports
+                ),
+
+                priority_fee_lamports=int(
+                    priority_fee_lamports
+                ),
+            )
+        )
+
+        gross_quote = int(
+            simulation.gross_quote_out
+        )
+
+        net_proceeds = int(
+            simulation.net_wallet_proceeds_lamports
+        )
+
+        if not simulation.executable:
+            connection.commit()
+
+            return ShadowCloseResult(
+                status="UNEXITABLE",
+                reasons=(
+                    "SELL_NOT_EXECUTABLE:"
+                    f"{simulation.ineligible_reason}",
+                ),
+
+                position_id=int(
+                    position["id"]
+                ),
+
+                mint=mint,
+
+                exit_reason=(
+                    exit_reason
+                ),
+
+                tokens_sold=(
+                    tokens_held
+                ),
+
+                gross_quote_lamports=(
+                    gross_quote
+                ),
+
+                net_proceeds_lamports=(
+                    net_proceeds
+                ),
+
+                realized_pnl_lamports=0,
+
+                sell_simulation=(
+                    simulation
+                ),
+
+                account_before=(
+                    account_before
+                ),
+
+                account_after=(
+                    account_before
+                ),
+            )
+
+        #
+        # A real wallet must be able to fund
+        # transaction overhead before the sell
+        # can land. Fail closed if shadow cash
+        # cannot support that requirement.
+        #
+        if (
+            account_before.cash_balance_lamports
+            < int(
+                simulation.total_transaction_overhead_lamports
+            )
+        ):
+            connection.commit()
+
+            return ShadowCloseResult(
+                status="BLOCK",
+                reasons=(
+                    "INSUFFICIENT_CASH_FOR_EXIT_OVERHEAD",
+                ),
+
+                position_id=int(
+                    position["id"]
+                ),
+
+                mint=mint,
+
+                exit_reason=(
+                    exit_reason
+                ),
+
+                tokens_sold=(
+                    tokens_held
+                ),
+
+                gross_quote_lamports=(
+                    gross_quote
+                ),
+
+                net_proceeds_lamports=(
+                    net_proceeds
+                ),
+
+                realized_pnl_lamports=0,
+
+                sell_simulation=(
+                    simulation
+                ),
+
+                account_before=(
+                    account_before
+                ),
+
+                account_after=(
+                    account_before
+                ),
+            )
+
+        if exit_timestamp is None:
+            exit_timestamp = int(
+                time.time()
+            )
+
+        wallet_cost = int(
+            position[
+                "entry_wallet_cost_lamports"
+            ]
+        )
+
+        realized_pnl = (
+            net_proceeds
+            - wallet_cost
+        )
+
+        now = int(
+            time.time()
+        )
+
+        updated = connection.execute(
+            """
+            UPDATE shadow_positions
+
+            SET
+                status = 'CLOSED',
+
+                latest_mark_value_lamports = ?,
+                unrealized_pnl_lamports = 0,
+
+                latest_virtual_quote_reserves = ?,
+                latest_virtual_token_reserves = ?,
+                latest_real_quote_reserves = ?,
+                latest_real_token_reserves = ?,
+
+                latest_mark_timestamp = ?,
+
+                exit_timestamp = ?,
+                exit_reason = ?,
+
+                exit_protocol_fee_bps = ?,
+                exit_creator_fee_bps = ?,
+
+                exit_gross_quote_lamports = ?,
+                exit_net_proceeds_lamports = ?,
+
+                realized_pnl_lamports = ?,
+
+                updated_at = ?
+
+            WHERE id = ?
+              AND status = 'OPEN'
+            """,
+            (
+                net_proceeds,
+
+                int(
+                    curve_state.virtual_quote_reserves
+                ),
+
+                int(
+                    curve_state.virtual_token_reserves
+                ),
+
+                int(
+                    curve_state.real_quote_reserves
+                ),
+
+                int(
+                    curve_state.real_token_reserves
+                ),
+
+                int(
+                    exit_timestamp
+                ),
+
+                int(
+                    exit_timestamp
+                ),
+
+                exit_reason.strip(),
+
+                int(
+                    protocol_fee_bps
+                ),
+
+                int(
+                    creator_fee_bps
+                ),
+
+                gross_quote,
+
+                net_proceeds,
+
+                realized_pnl,
+
+                now,
+
+                int(
+                    position["id"]
+                ),
+            ),
+        )
+
+        if updated.rowcount != 1:
+            connection.rollback()
+
+            return ShadowCloseResult(
+                status="UNKNOWN",
+                reasons=(
+                    "POSITION_CLOSE_STATE_CHANGED",
+                ),
+
+                position_id=int(
+                    position["id"]
+                ),
+
+                mint=mint,
+
+                exit_reason=(
+                    exit_reason
+                ),
+
+                tokens_sold=(
+                    tokens_held
+                ),
+
+                gross_quote_lamports=(
+                    gross_quote
+                ),
+
+                net_proceeds_lamports=(
+                    net_proceeds
+                ),
+
+                realized_pnl_lamports=0,
+
+                sell_simulation=(
+                    simulation
+                ),
+
+                account_before=(
+                    account_before
+                ),
+
+                account_after=None,
+            )
+
+        cash_updated = connection.execute(
+            """
+            UPDATE shadow_account
+
+            SET
+                cash_balance_lamports =
+                    cash_balance_lamports + ?,
+                updated_at = ?
+
+            WHERE id = 1
+            """,
+            (
+                net_proceeds,
+                now,
+            ),
+        )
+
+        if cash_updated.rowcount != 1:
+            connection.rollback()
+
+            return ShadowCloseResult(
+                status="UNKNOWN",
+                reasons=(
+                    "SHADOW_ACCOUNT_UPDATE_FAILED",
+                ),
+
+                position_id=int(
+                    position["id"]
+                ),
+
+                mint=mint,
+
+                exit_reason=(
+                    exit_reason
+                ),
+
+                tokens_sold=(
+                    tokens_held
+                ),
+
+                gross_quote_lamports=(
+                    gross_quote
+                ),
+
+                net_proceeds_lamports=(
+                    net_proceeds
+                ),
+
+                realized_pnl_lamports=0,
+
+                sell_simulation=(
+                    simulation
+                ),
+
+                account_before=(
+                    account_before
+                ),
+
+                account_after=None,
+            )
+
+        account_after = (
+            refresh_account(
+                connection
+            )
+        )
+
+        connection.commit()
+
+        return ShadowCloseResult(
+            status="CLOSED",
+            reasons=(),
+
+            position_id=int(
+                position["id"]
+            ),
+
+            mint=mint,
+
+            exit_reason=(
+                exit_reason.strip()
+            ),
+
+            tokens_sold=(
+                tokens_held
+            ),
+
+            gross_quote_lamports=(
+                gross_quote
+            ),
+
+            net_proceeds_lamports=(
+                net_proceeds
+            ),
+
+            realized_pnl_lamports=(
+                realized_pnl
+            ),
+
+            sell_simulation=(
+                simulation
+            ),
+
+            account_before=(
+                account_before
+            ),
+
+            account_after=(
+                account_after
+            ),
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
 
 def mark_open_position(
     *,

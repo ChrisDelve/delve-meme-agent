@@ -35,6 +35,10 @@ from src.data.transaction_decoder import (
     fetch_transaction,
 )
 
+from src.strategies.pretrade_shadow import (
+    schedule_pretrade_shadow_candidate,
+)
+
 from src.strategies.model_shadow_signals import (
     record_model_shadow_prediction,
 )
@@ -287,22 +291,120 @@ def process_buy_event(
     rank = result["observed_rank"]
     entry_age = result["entry_age_seconds"]
 
+    prediction = None
+
     try:
-        record_model_shadow_prediction(
-            signature=signature,
-            slot=slot,
-            wallet=trade_event["user"],
-            mint=trade_event["mint"],
-            quote_mint=trade_event["quote_mint"],
-            trade_timestamp=trade_event["timestamp"],
-            mayhem_mode=trade_event["mayhem_mode"],
-            observed_at=observed_at,
+        prediction = (
+            record_model_shadow_prediction(
+                signature=signature,
+                slot=slot,
+                wallet=trade_event["user"],
+                mint=trade_event["mint"],
+                quote_mint=trade_event["quote_mint"],
+                trade_timestamp=(
+                    trade_event["timestamp"]
+                ),
+                mayhem_mode=(
+                    trade_event["mayhem_mode"]
+                ),
+                observed_at=observed_at,
+            )
         )
+
     except Exception as error:
         print(
             "⚠️ MODEL SHADOW ERROR | "
             f"{type(error).__name__}: {error}"
         )
+
+    if prediction is not None:
+        try:
+            schedule_pretrade_shadow_candidate(
+                entry_signature=(
+                    signature
+                ),
+
+                mint=(
+                    trade_event["mint"]
+                ),
+
+                quote_mint=(
+                    trade_event["quote_mint"]
+                ),
+
+                slot=slot,
+
+                trade_timestamp=(
+                    trade_event["timestamp"]
+                ),
+
+                predicted_at=int(
+                    prediction[
+                        "predicted_at"
+                    ]
+                ),
+
+                model_eligible=bool(
+                    prediction[
+                        "model_eligible"
+                    ]
+                ),
+
+                probability_2x_15m=(
+                    prediction[
+                        "probability_2x_15m"
+                    ]
+                ),
+
+                signal_virtual_quote_reserves=(
+                    trade_event[
+                        "virtual_sol_reserves"
+                    ]
+                ),
+
+                signal_virtual_token_reserves=(
+                    trade_event[
+                        "virtual_token_reserves"
+                    ]
+                ),
+
+                signal_real_quote_reserves=(
+                    trade_event[
+                        "real_sol_reserves"
+                    ]
+                ),
+
+                signal_real_token_reserves=(
+                    trade_event[
+                        "real_token_reserves"
+                    ]
+                ),
+
+                quote_amount=(
+                    trade_event[
+                        "quote_amount"
+                    ]
+                ),
+
+                protocol_fee_lamports=(
+                    trade_event[
+                        "fee"
+                    ]
+                ),
+
+                creator_fee_lamports=(
+                    trade_event[
+                        "creator_fee"
+                    ]
+                ),
+            )
+
+        except Exception as error:
+            print(
+                "⚠️ PRETRADE SCHEDULE ERROR | "
+                f"{type(error).__name__}: "
+                f"{error}"
+            )
 
     shadow_signal = record_shadow_signal(
         signature=signature,

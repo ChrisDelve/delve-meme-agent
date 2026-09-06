@@ -78,6 +78,8 @@ async def process_launch(
     signature,
     slot,
 ):
+
+    
     async with PROCESSING_LIMIT:
         transaction = await fetch_transaction(
             signature
@@ -133,6 +135,34 @@ async def process_launch(
         )
         print("=" * 70)
 
+async def process_launch_safe(
+    signature,
+    slot,
+):
+    """
+    Isolate launch enrichment from the trade collector while ensuring
+    background failures are visible.
+
+    Launch processing is non-critical to raw trade ingestion, so a launch
+    failure must not terminate the market collector. However, failures must
+    never disappear silently because they reduce launch-feature coverage.
+    """
+    try:
+        await process_launch(
+            signature,
+            slot,
+        )
+
+    except asyncio.CancelledError:
+        raise
+
+    except Exception as error:
+        print()
+        print("⚠️ BACKGROUND LAUNCH PROCESSOR FAILED")
+        print(f"Signature: {signature}")
+        print(f"Slot:      {slot}")
+        print(f"Error:     {error!r}")
+        print("=" * 70)
 
 async def process_buy(
     signature,
@@ -433,7 +463,7 @@ async def listen():
                     )
                     if is_create:
                         asyncio.create_task(
-                            process_launch(
+                            process_launch_safe(
                                 signature,
                                 slot,
                             )

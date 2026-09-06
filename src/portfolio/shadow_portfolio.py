@@ -1847,6 +1847,38 @@ def close_shadow_position(
     finally:
         connection.close()
 
+def list_open_shadow_mints(
+    *,
+    db_path: Path = DB_PATH,
+) -> set[str]:
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        init_schema(
+            connection
+        )
+
+        rows = connection.execute(
+            """
+            SELECT mint
+            FROM shadow_positions
+            WHERE status = 'OPEN'
+            """
+        ).fetchall()
+
+        return {
+            str(
+                row["mint"]
+            )
+            for row in rows
+        }
+
+    finally:
+        connection.close()
+
 def mark_open_position(
     *,
     mint: str,

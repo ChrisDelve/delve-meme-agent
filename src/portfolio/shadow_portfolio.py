@@ -52,6 +52,18 @@ class ShadowAccountSnapshot:
 
     day_key: str
 
+@dataclass(frozen=True)
+class ShadowRiskPreview:
+    status: str
+    reasons: tuple[str, ...]
+
+    account: (
+        ShadowAccountSnapshot | None
+    )
+
+    risk_result: (
+        RiskGovernorResult | None
+    )
 
 @dataclass(frozen=True)
 class ShadowEntryResult:
@@ -572,6 +584,117 @@ def to_risk_state(
         ),
     )
 
+def preview_shadow_entry_risk(
+    *,
+    mint: str,
+
+    curve_state: PumpCurveState,
+
+    protocol_fee_bps: int,
+    creator_fee_bps: int,
+
+    slippage_bps: int,
+    base_network_fee_lamports: int,
+    priority_fee_lamports: int,
+    rent_lamports: int,
+
+    policy: RiskPolicy | None = None,
+
+    db_path: Path = DB_PATH,
+) -> ShadowRiskPreview:
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        ensure_account(
+            connection
+        )
+
+        account = refresh_account(
+            connection
+        )
+
+        duplicate = connection.execute(
+            """
+            SELECT id
+            FROM shadow_positions
+            WHERE mint = ?
+              AND status = 'OPEN'
+            """,
+            (
+                mint,
+            ),
+        ).fetchone()
+
+        if duplicate is not None:
+            connection.commit()
+
+            return ShadowRiskPreview(
+                status="BLOCK",
+                reasons=(
+                    "POSITION_ALREADY_OPEN_FOR_MINT",
+                ),
+                account=account,
+                risk_result=None,
+            )
+
+        risk = evaluate_risk(
+            account=to_risk_state(
+                account
+            ),
+
+            curve_state=curve_state,
+
+            protocol_fee_bps=int(
+                protocol_fee_bps
+            ),
+
+            creator_fee_bps=int(
+                creator_fee_bps
+            ),
+
+            slippage_bps=int(
+                slippage_bps
+            ),
+
+            base_network_fee_lamports=int(
+                base_network_fee_lamports
+            ),
+
+            priority_fee_lamports=int(
+                priority_fee_lamports
+            ),
+
+            rent_lamports=int(
+                rent_lamports
+            ),
+
+            policy=policy,
+        )
+
+        connection.commit()
+
+        return ShadowRiskPreview(
+            status=risk.status,
+            reasons=tuple(
+                risk.reasons
+            ),
+            account=account,
+            risk_result=risk,
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
 
 def open_shadow_position(
     *,
@@ -582,6 +705,10 @@ def open_shadow_position(
     entry_timestamp: int,
 
     curve_state: PumpCurveState,
+
+    approved_simulation: (
+        PumpBuySimulation | None
+    ) = None,
 
     protocol_fee_bps: int,
     creator_fee_bps: int,
@@ -703,9 +830,158 @@ def open_shadow_position(
                 initial_exit_simulation=None,
             )
 
-        simulation = (
-            risk.recommended_simulation
-        )
+        if approved_simulation is None:
+            #
+            # Convenience path used by isolated tests.
+            # The autonomous pipeline will supply the
+            # exact execution-approved simulation.
+            #
+            simulation = (
+                risk.recommended_simulation
+            )
+
+        else:
+            simulation = (
+                approved_simulation
+            )
+
+            #
+            # Re-check account risk at commit time.
+            # If account state changed enough that the
+            # approved size is no longer permitted,
+            # fail closed rather than resize silently.
+            #
+            if (
+                int(
+                    simulation.spendable_quote_in
+                )
+                > int(
+                    risk.recommended_spend_lamports
+                )
+            ):
+                connection.commit()
+
+                return ShadowEntryResult(
+                    status="BLOCK",
+                    reasons=(
+                        "APPROVED_SIZE_EXCEEDS_CURRENT_RISK_BUDGET",
+                    ),
+                    position_id=None,
+                    account_before=(
+                        account_before
+                    ),
+                    account_after=(
+                        account_before
+                    ),
+                    risk_result=risk,
+                    simulation=simulation,
+                    initial_exit_simulation=None,
+                )
+
+            #
+            # The approved simulation must describe
+            # this exact curve snapshot.
+            #
+            if (
+                int(
+                    simulation.pre_virtual_quote_reserves
+                )
+                != int(
+                    curve_state.virtual_quote_reserves
+                )
+                or int(
+                    simulation.pre_virtual_token_reserves
+                )
+                != int(
+                    curve_state.virtual_token_reserves
+                )
+                or int(
+                    simulation.pre_real_quote_reserves
+                )
+                != int(
+                    curve_state.real_quote_reserves
+                )
+                or int(
+                    simulation.pre_real_token_reserves
+                )
+                != int(
+                    curve_state.real_token_reserves
+                )
+            ):
+                connection.rollback()
+
+                return ShadowEntryResult(
+                    status="UNKNOWN",
+                    reasons=(
+                        "APPROVED_SIMULATION_CURVE_MISMATCH",
+                    ),
+                    position_id=None,
+                    account_before=(
+                        account_before
+                    ),
+                    account_after=None,
+                    risk_result=risk,
+                    simulation=simulation,
+                    initial_exit_simulation=None,
+                )
+
+            #
+            # Execution assumptions must also match.
+            #
+            if (
+                int(
+                    simulation.protocol_fee_bps
+                )
+                != int(
+                    protocol_fee_bps
+                )
+                or int(
+                    simulation.creator_fee_bps
+                )
+                != int(
+                    creator_fee_bps
+                )
+                or int(
+                    simulation.slippage_bps
+                )
+                != int(
+                    slippage_bps
+                )
+                or int(
+                    simulation.base_network_fee_lamports
+                )
+                != int(
+                    base_network_fee_lamports
+                )
+                or int(
+                    simulation.priority_fee_lamports
+                )
+                != int(
+                    priority_fee_lamports
+                )
+                or int(
+                    simulation.rent_lamports
+                )
+                != int(
+                    rent_lamports
+                )
+            ):
+                connection.rollback()
+
+                return ShadowEntryResult(
+                    status="UNKNOWN",
+                    reasons=(
+                        "APPROVED_SIMULATION_ASSUMPTION_MISMATCH",
+                    ),
+                    position_id=None,
+                    account_before=(
+                        account_before
+                    ),
+                    account_after=None,
+                    risk_result=risk,
+                    simulation=simulation,
+                    initial_exit_simulation=None,
+                )
 
         if simulation is None:
             connection.rollback()

@@ -249,25 +249,19 @@ def rebuild_outcomes():
                 ),
             ).fetchall()
 
-            if not later_trades:
-                continue
+            all_prices = [entry_price]
 
-            all_prices = [
-                price_raw(
-                    trade["quote_amount"],
-                    trade["token_amount"],
-                )
-                for trade in later_trades
-            ]
-
-            all_prices = [
+            all_prices.extend(
                 value
-                for value in all_prices
+                for value in (
+                    price_raw(
+                        trade["quote_amount"],
+                        trade["token_amount"],
+                    )
+                    for trade in later_trades
+                )
                 if value is not None
-            ]
-
-            if not all_prices:
-                continue
+            )
 
             peak_all = max(all_prices) / entry_price
             trough_all = min(all_prices) / entry_price
@@ -288,6 +282,8 @@ def rebuild_outcomes():
                 else None
             )
 
+            if eligible_5m and peak_5m is None:
+                peak_5m = 1.0
             peak_15m = (
                 calculate_peak_multiple(
                     entry_price,
@@ -298,6 +294,8 @@ def rebuild_outcomes():
                 else None
             )
 
+            if eligible_5m and peak_5m is None:
+                peak_5m = 1.0
             peak_1h = (
                 calculate_peak_multiple(
                     entry_price,
@@ -308,6 +306,8 @@ def rebuild_outcomes():
                 else None
             )
 
+            if eligible_1h and peak_1h is None:
+                peak_1h = 1.0
             time_to_2x = first_multiple_time(
                 entry["trade_timestamp"],
                 entry_price,
@@ -329,9 +329,13 @@ def rebuild_outcomes():
                 10.0,
             )
 
-            latest_timestamp = max(
-                trade["trade_timestamp"]
-                for trade in later_trades
+            latest_timestamp = (
+                max(
+                    trade["trade_timestamp"]
+                    for trade in later_trades
+                )
+                if later_trades
+                else entry["trade_timestamp"]
             )
 
             connection.execute(

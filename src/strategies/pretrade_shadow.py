@@ -944,7 +944,11 @@ async def run_candidate(
             )
         )
 
-        execution = (
+                #
+        # Stage 1:
+        # Small execution-quality probe.
+        #
+        probe_execution = (
             evaluate_execution_quality(
                 snapshot=(
                     safety.snapshot
@@ -990,6 +994,253 @@ async def run_candidate(
                 ),
             )
         )
+
+        execution = probe_execution
+
+        decision_status = (
+            probe_execution.status
+        )
+
+        decision_reasons = tuple(
+            probe_execution.reasons
+        )
+
+        portfolio_entry = None
+
+        #
+        # Stage 2:
+        # Only a clean probe can proceed to
+        # account-level risk sizing.
+        #
+        if probe_execution.status == "PASS":
+            curve_state = (
+                curve_state_from_live_curve(
+                    live_curve
+                )
+            )
+
+            risk_preview = (
+                preview_shadow_entry_risk(
+                    mint=mint,
+
+                    curve_state=(
+                        curve_state
+                    ),
+
+                    protocol_fee_bps=int(
+                        protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        creator_fee_bps
+                    ),
+
+                    slippage_bps=(
+                        SHADOW_SLIPPAGE_BPS
+                    ),
+
+                    base_network_fee_lamports=(
+                        SHADOW_BASE_NETWORK_FEE_LAMPORTS
+                    ),
+
+                    priority_fee_lamports=(
+                        SHADOW_PRIORITY_FEE_LAMPORTS
+                    ),
+
+                    rent_lamports=(
+                        SHADOW_RENT_LAMPORTS
+                    ),
+                )
+            )
+
+            risk = (
+                risk_preview.risk_result
+            )
+
+            if (
+                risk is None
+                or not risk.allows_new_position
+            ):
+                decision_status = (
+                    "REJECT"
+                    if risk_preview.status
+                    == "BLOCK"
+                    else "UNKNOWN"
+                )
+
+                decision_reasons = (
+                    tuple(
+                        f"RISK:{reason}"
+                        for reason
+                        in risk_preview.reasons
+                    )
+                    or (
+                        "RISK:ENTRY_NOT_ALLOWED",
+                    )
+                )
+
+            else:
+                #
+                # Stage 3:
+                # Re-run execution quality using
+                # the ACTUAL risk-sized order.
+                #
+                execution = (
+                    evaluate_execution_quality(
+                        snapshot=(
+                            safety.snapshot
+                        ),
+
+                        live_curve=(
+                            live_curve
+                        ),
+
+                        signal_virtual_quote_reserves=int(
+                            signal_virtual_quote_reserves
+                        ),
+
+                        signal_virtual_token_reserves=int(
+                            signal_virtual_token_reserves
+                        ),
+
+                        spendable_quote_in=int(
+                            risk.recommended_spend_lamports
+                        ),
+
+                        protocol_fee_bps=int(
+                            protocol_fee_bps
+                        ),
+
+                        creator_fee_bps=int(
+                            creator_fee_bps
+                        ),
+
+                        slippage_bps=(
+                            SHADOW_SLIPPAGE_BPS
+                        ),
+
+                        base_network_fee_lamports=(
+                            SHADOW_BASE_NETWORK_FEE_LAMPORTS
+                        ),
+
+                        priority_fee_lamports=(
+                            SHADOW_PRIORITY_FEE_LAMPORTS
+                        ),
+
+                        rent_lamports=(
+                            SHADOW_RENT_LAMPORTS
+                        ),
+                    )
+                )
+
+                if (
+                    execution.status
+                    != "PASS"
+                    or execution.simulation
+                    is None
+                ):
+                    decision_status = (
+                        execution.status
+                    )
+
+                    decision_reasons = (
+                        tuple(
+                            execution.reasons
+                        )
+                        or (
+                            "SIZED_EXECUTION_NOT_APPROVED",
+                        )
+                    )
+
+                else:
+                    #
+                    # Stage 4:
+                    # Commit the EXACT simulation
+                    # that passed sized execution
+                    # validation.
+                    #
+                    portfolio_entry = (
+                        open_shadow_position(
+                            entry_signature=(
+                                entry_signature
+                            ),
+
+                            mint=mint,
+
+                            probability_2x_15m=(
+                                probability_2x_15m
+                            ),
+
+                            entry_slot=(
+                                live_curve.rpc_slot
+                            ),
+
+                            entry_timestamp=int(
+                                time.time()
+                            ),
+
+                            curve_state=(
+                                curve_state
+                            ),
+
+                            approved_simulation=(
+                                execution.simulation
+                            ),
+
+                            protocol_fee_bps=int(
+                                protocol_fee_bps
+                            ),
+
+                            creator_fee_bps=int(
+                                creator_fee_bps
+                            ),
+
+                            slippage_bps=(
+                                SHADOW_SLIPPAGE_BPS
+                            ),
+
+                            base_network_fee_lamports=(
+                                SHADOW_BASE_NETWORK_FEE_LAMPORTS
+                            ),
+
+                            priority_fee_lamports=(
+                                SHADOW_PRIORITY_FEE_LAMPORTS
+                            ),
+
+                            rent_lamports=(
+                                SHADOW_RENT_LAMPORTS
+                            ),
+                        )
+                    )
+
+                    if (
+                        portfolio_entry.status
+                        == "PASS"
+                    ):
+                        decision_status = "PASS"
+                        decision_reasons = ()
+
+                    else:
+                        decision_status = (
+                            "REJECT"
+                            if portfolio_entry.status
+                            in (
+                                "BLOCK",
+                                "REJECT",
+                            )
+                            else "UNKNOWN"
+                        )
+
+                        decision_reasons = (
+                            tuple(
+                                f"PORTFOLIO:{reason}"
+                                for reason
+                                in portfolio_entry.reasons
+                            )
+                            or (
+                                "PORTFOLIO:ENTRY_FAILED",
+                            )
+                        )
 
         record = make_record(
             entry_signature=(
@@ -1061,10 +1312,10 @@ async def run_candidate(
                 execution.snapshot_age_seconds
             ),
             final_status=(
-                execution.status
+                decision_status
             ),
-            final_reasons=tuple(
-                execution.reasons
+            final_reasons=(
+                decision_reasons
             ),
             scheduled_at=(
                 scheduled_at
@@ -1080,7 +1331,7 @@ async def run_candidate(
 
         cooldown = (
             UNKNOWN_RETRY_SECONDS
-            if execution.status
+            if decision_status
             == "UNKNOWN"
             else MINT_COOLDOWN_SECONDS
         )

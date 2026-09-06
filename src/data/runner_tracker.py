@@ -116,7 +116,7 @@ def calculate_peak_multiple(
     trade_rows,
     cutoff_timestamp=None,
 ):
-    prices = []
+    prices = [entry_price]
 
     for trade in trade_rows:
         timestamp = trade["trade_timestamp"]
@@ -234,7 +234,7 @@ def rebuild_outcomes():
                 WHERE
                     mint = ?
                     AND quote_mint = ?
-                    AND trade_timestamp >= ?
+                    AND trade_timestamp > ?
                     AND quote_amount > 0
                     AND token_amount > 0
                 ORDER BY
@@ -294,8 +294,8 @@ def rebuild_outcomes():
                 else None
             )
 
-            if eligible_5m and peak_5m is None:
-                peak_5m = 1.0
+            if eligible_15m and peak_15m is None:
+                peak_15m = 1.0
             peak_1h = (
                 calculate_peak_multiple(
                     entry_price,

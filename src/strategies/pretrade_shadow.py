@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.execution.execution_quality_gate import (
+    curve_state_from_live_curve,
     evaluate_execution_quality,
 )
 from src.execution.live_curve_state import (
@@ -16,6 +17,11 @@ from src.execution.live_curve_state import (
 
 from src.execution.live_fee_resolver import (
     resolve_live_event_fee_bps,
+)
+
+from src.portfolio.shadow_portfolio import (
+    open_shadow_position,
+    preview_shadow_entry_risk,
 )
 
 from src.safety.token_safety_gate import (

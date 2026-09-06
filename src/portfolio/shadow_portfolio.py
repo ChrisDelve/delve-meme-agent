@@ -1164,7 +1164,7 @@ def open_shadow_position(
                 ),
 
                 int(
-                    risk.recommended_spend_lamports
+                    simulation.spendable_quote_in
                 ),
 
                 wallet_cost,

@@ -21,6 +21,10 @@ from src.safety.token_safety_resolver import (
     TokenSafetySnapshot,
 )
 
+from src.execution.live_curve_state import (
+    LivePumpCurveState,
+    resolve_live_pump_curve_state,
+)
 
 GATE_VERSION = "execution-quality-gate-v1"
 
@@ -125,10 +129,10 @@ def sol_to_lamports(
     return lamports
 
 
-def curve_state_from_snapshot(
-    snapshot: TokenSafetySnapshot,
+def curve_state_from_live_curve(
+    live_curve: LivePumpCurveState,
 ) -> PumpCurveState:
-    curve = snapshot.bonding_curve
+    curve = live_curve.curve
 
     return PumpCurveState(
         virtual_quote_reserves=(
@@ -149,6 +153,7 @@ def curve_state_from_snapshot(
 def evaluate_execution_quality(
     *,
     snapshot: TokenSafetySnapshot,
+    live_curve: LivePumpCurveState,
     signal_virtual_quote_reserves: int,
     signal_virtual_token_reserves: int,
     spendable_quote_in: int,
@@ -207,10 +212,15 @@ def evaluate_execution_quality(
         / signal_virtual_token_reserves
     )
 
+    if live_curve.mint != snapshot.mint:
+        unknown_reasons.append(
+            "LIVE_CURVE_MINT_MISMATCH"
+        )
+
     snapshot_age = max(
         0.0,
         time.time()
-        - snapshot.fetched_at,
+        - live_curve.fetched_at,
     )
 
     if (
@@ -218,11 +228,28 @@ def evaluate_execution_quality(
         > MAX_SNAPSHOT_AGE_SECONDS
     ):
         unknown_reasons.append(
-            "LIVE_SNAPSHOT_STALE"
+            "LIVE_CURVE_STATE_STALE"
         )
 
-    state = curve_state_from_snapshot(
-        snapshot
+    if live_curve.curve.complete:
+        abort_reasons.append(
+            "BONDING_CURVE_COMPLETED_BEFORE_ENTRY"
+        )
+
+    if (
+        live_curve.curve.real_token_reserves
+        <= 0
+    ):
+        abort_reasons.append(
+            "NO_LIVE_TOKEN_LIQUIDITY"
+        )
+
+    state = curve_state_from_live_curve(
+        live_curve
+    )
+
+    state = curve_state_from_live_curve(
+        live_curve
     )
 
     if (
@@ -526,8 +553,73 @@ async def resolve_and_evaluate(
             ),
         )
 
+    try:
+        live_curve = (
+            await resolve_live_pump_curve_state(
+                mint=mint,
+                min_context_slot=(
+                    safety_result.snapshot.rpc_max_slot
+                ),
+            )
+        )
+
+    except Exception as error:
+        return ExecutionQualityResult(
+            gate_version=GATE_VERSION,
+
+            mint=mint,
+
+            status=UNKNOWN,
+
+            reasons=(
+                "LIVE_CURVE_RESOLUTION_FAILED:"
+                f"{type(error).__name__}",
+            ),
+
+            signal_spot_price_raw=(
+                signal_virtual_quote_reserves
+                / signal_virtual_token_reserves
+                if (
+                    signal_virtual_quote_reserves > 0
+                    and signal_virtual_token_reserves > 0
+                )
+                else 0.0
+            ),
+
+            live_spot_price_raw=None,
+
+            market_drift_bps=None,
+            price_impact_bps=None,
+            all_in_vs_signal_bps=None,
+
+            spendable_quote_in=(
+                spendable_quote_in
+            ),
+
+            protocol_fee_bps=(
+                protocol_fee_bps
+            ),
+
+            creator_fee_bps=(
+                creator_fee_bps
+            ),
+
+            slippage_bps=(
+                slippage_bps
+            ),
+
+            snapshot_age_seconds=None,
+
+            simulation=None,
+
+            evaluated_at=int(
+                time.time()
+            ),
+        )
+
     return evaluate_execution_quality(
         snapshot=safety_result.snapshot,
+        live_curve=live_curve,
 
         signal_virtual_quote_reserves=(
             signal_virtual_quote_reserves
@@ -639,11 +731,11 @@ def print_result(
     )
 
     print(
-        f"Snapshot age:            "
+        f"Live curve age:          "
         f"{result.snapshot_age_seconds:.3f}s"
         if result.snapshot_age_seconds is not None
         else
-        "Snapshot age:            UNKNOWN"
+        "Live curve age:          UNKNOWN"
     )
 
     print()

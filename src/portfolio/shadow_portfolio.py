@@ -192,6 +192,19 @@ class ShadowPartialCloseResult:
         ShadowAccountSnapshot | None
     )
 
+@dataclass(frozen=True)
+class ShadowExitIntentResult:
+    status: str
+    reasons: tuple[str, ...]
+
+    position_id: int | None
+    mint: str
+
+    exit_pending_reason: str | None
+    exit_pending_since: int | None
+
+    newly_set: bool
+
 def utc_day_key(
     timestamp: float | None = None,
 ) -> str:
@@ -4307,6 +4320,438 @@ def write_off_shadow_position(
     except Exception:
         connection.rollback()
         raise
+
+    finally:
+        connection.close()
+
+def set_shadow_exit_intent(
+    *,
+    mint: str,
+    exit_reason: str,
+
+    exit_timestamp: int | None = None,
+
+    db_path: Path = DB_PATH,
+) -> ShadowExitIntentResult:
+    """
+    Persist the first mandated exit intent for an
+    OPEN shadow position.
+
+    First intent wins. Once set, later callers
+    receive the original reason and timestamp
+    unchanged.
+    """
+
+    exit_reason = exit_reason.strip()
+
+    if not exit_reason:
+        raise ValueError(
+            "exit_reason must not be empty."
+        )
+
+    if exit_timestamp is None:
+        exit_timestamp = int(
+            time.time()
+        )
+    else:
+        exit_timestamp = int(
+            exit_timestamp
+        )
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        init_schema(
+            connection
+        )
+
+        position = connection.execute(
+            """
+            SELECT
+                id,
+                exit_pending_reason,
+                exit_pending_since
+
+            FROM shadow_positions
+
+            WHERE mint = ?
+              AND status = 'OPEN'
+
+            LIMIT 1
+            """,
+            (
+                mint,
+            ),
+        ).fetchone()
+
+        if position is None:
+            connection.commit()
+
+            return ShadowExitIntentResult(
+                status="NO_POSITION",
+                reasons=(),
+
+                position_id=None,
+                mint=mint,
+
+                exit_pending_reason=None,
+                exit_pending_since=None,
+
+                newly_set=False,
+            )
+
+        position_id = int(
+            position["id"]
+        )
+
+        existing_reason = (
+            position[
+                "exit_pending_reason"
+            ]
+        )
+
+        existing_since = (
+            position[
+                "exit_pending_since"
+            ]
+        )
+
+        #
+        # Stored intent must be all-or-nothing.
+        #
+        if (
+            (
+                existing_reason is None
+                and existing_since is not None
+            )
+            or (
+                existing_reason is not None
+                and existing_since is None
+            )
+        ):
+            connection.rollback()
+
+            return ShadowExitIntentResult(
+                status="UNKNOWN",
+                reasons=(
+                    "INCONSISTENT_EXIT_INTENT_STATE",
+                ),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_pending_reason=(
+                    None
+                    if existing_reason is None
+                    else str(
+                        existing_reason
+                    )
+                ),
+
+                exit_pending_since=(
+                    None
+                    if existing_since is None
+                    else int(
+                        existing_since
+                    )
+                ),
+
+                newly_set=False,
+            )
+
+        #
+        # First intent has already won.
+        #
+        if (
+            existing_reason is not None
+            and existing_since is not None
+        ):
+            connection.commit()
+
+            return ShadowExitIntentResult(
+                status="EXISTING",
+                reasons=(),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_pending_reason=str(
+                    existing_reason
+                ),
+
+                exit_pending_since=int(
+                    existing_since
+                ),
+
+                newly_set=False,
+            )
+
+        now = int(
+            time.time()
+        )
+
+        updated = connection.execute(
+            """
+            UPDATE shadow_positions
+
+            SET
+                exit_pending_reason = ?,
+                exit_pending_since = ?,
+                updated_at = ?
+
+            WHERE id = ?
+              AND status = 'OPEN'
+              AND exit_pending_reason IS NULL
+              AND exit_pending_since IS NULL
+            """,
+            (
+                exit_reason,
+                exit_timestamp,
+                now,
+                position_id,
+            ),
+        )
+
+        if updated.rowcount == 1:
+            connection.commit()
+
+            return ShadowExitIntentResult(
+                status="SET",
+                reasons=(),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_pending_reason=(
+                    exit_reason
+                ),
+
+                exit_pending_since=(
+                    exit_timestamp
+                ),
+
+                newly_set=True,
+            )
+
+        #
+        # Defensive re-read. BEGIN IMMEDIATE should
+        # serialize competing writers, but never
+        # guess if the state changed unexpectedly.
+        #
+        current = connection.execute(
+            """
+            SELECT
+                status,
+                exit_pending_reason,
+                exit_pending_since
+
+            FROM shadow_positions
+
+            WHERE id = ?
+
+            LIMIT 1
+            """,
+            (
+                position_id,
+            ),
+        ).fetchone()
+
+        if (
+            current is not None
+            and current["status"] == "OPEN"
+            and current[
+                "exit_pending_reason"
+            ]
+            is not None
+            and current[
+                "exit_pending_since"
+            ]
+            is not None
+        ):
+            connection.commit()
+
+            return ShadowExitIntentResult(
+                status="EXISTING",
+                reasons=(),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_pending_reason=str(
+                    current[
+                        "exit_pending_reason"
+                    ]
+                ),
+
+                exit_pending_since=int(
+                    current[
+                        "exit_pending_since"
+                    ]
+                ),
+
+                newly_set=False,
+            )
+
+        connection.rollback()
+
+        return ShadowExitIntentResult(
+            status="UNKNOWN",
+            reasons=(
+                "EXIT_INTENT_STATE_CHANGED",
+            ),
+
+            position_id=position_id,
+            mint=mint,
+
+            exit_pending_reason=None,
+            exit_pending_since=None,
+
+            newly_set=False,
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+def get_shadow_exit_intent(
+    *,
+    mint: str,
+    db_path: Path = DB_PATH,
+) -> ShadowExitIntentResult:
+    """
+    Read durable exit intent for an OPEN shadow
+    position without modifying it.
+    """
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        init_schema(
+            connection
+        )
+
+        position = connection.execute(
+            """
+            SELECT
+                id,
+                exit_pending_reason,
+                exit_pending_since
+
+            FROM shadow_positions
+
+            WHERE mint = ?
+              AND status = 'OPEN'
+
+            LIMIT 1
+            """,
+            (
+                mint,
+            ),
+        ).fetchone()
+
+        if position is None:
+            return ShadowExitIntentResult(
+                status="NO_POSITION",
+                reasons=(),
+
+                position_id=None,
+                mint=mint,
+
+                exit_pending_reason=None,
+                exit_pending_since=None,
+
+                newly_set=False,
+            )
+
+        position_id = int(
+            position["id"]
+        )
+
+        reason = position[
+            "exit_pending_reason"
+        ]
+
+        since = position[
+            "exit_pending_since"
+        ]
+
+        if (
+            reason is None
+            and since is None
+        ):
+            return ShadowExitIntentResult(
+                status="NONE",
+                reasons=(),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_pending_reason=None,
+                exit_pending_since=None,
+
+                newly_set=False,
+            )
+
+        if (
+            reason is None
+            or since is None
+        ):
+            return ShadowExitIntentResult(
+                status="UNKNOWN",
+                reasons=(
+                    "INCONSISTENT_EXIT_INTENT_STATE",
+                ),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_pending_reason=(
+                    None
+                    if reason is None
+                    else str(
+                        reason
+                    )
+                ),
+
+                exit_pending_since=(
+                    None
+                    if since is None
+                    else int(
+                        since
+                    )
+                ),
+
+                newly_set=False,
+            )
+
+        return ShadowExitIntentResult(
+            status="EXISTING",
+            reasons=(),
+
+            position_id=position_id,
+            mint=mint,
+
+            exit_pending_reason=str(
+                reason
+            ),
+
+            exit_pending_since=int(
+                since
+            ),
+
+            newly_set=False,
+        )
 
     finally:
         connection.close()

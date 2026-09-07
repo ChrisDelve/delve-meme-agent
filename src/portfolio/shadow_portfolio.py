@@ -2348,6 +2348,9 @@ def mark_open_position(
                 entry_timestamp=None,
                 entry_wallet_cost_lamports=None,
 
+                remaining_cost_basis_lamports=None,
+                cumulative_net_proceeds_lamports=0,
+
                 mark_value_lamports=0,
                 unrealized_pnl_lamports=0,
                 sell_simulation=None,
@@ -2414,15 +2417,21 @@ def mark_open_position(
             #
             mark_value = 0
 
-        wallet_cost = int(
+        remaining_cost_basis = int(
             position[
-                "entry_wallet_cost_lamports"
+                "remaining_cost_basis_lamports"
+            ]
+        )
+
+        cumulative_net_proceeds = int(
+            position[
+                "cumulative_net_proceeds_lamports"
             ]
         )
 
         unrealized_pnl = (
             mark_value
-            - wallet_cost
+            - remaining_cost_basis
         )
 
         if mark_timestamp is None:
@@ -2512,6 +2521,14 @@ def mark_open_position(
                 position[
                     "entry_wallet_cost_lamports"
                 ]
+            ),
+
+            remaining_cost_basis_lamports=(
+                remaining_cost_basis
+            ),
+
+            cumulative_net_proceeds_lamports=(
+                cumulative_net_proceeds
             ),
 
             mark_value_lamports=(

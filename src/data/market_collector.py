@@ -13,8 +13,12 @@ from src.strategies.shadow_signals import (
 )
 
 from src.strategies.shadow_position_manager import (
+    initialize_shadow_position_manager,
     is_open_shadow_mint_tracked,
     process_shadow_position_event,
+)
+from src.strategies.shadow_position_sweeper import (
+    run_shadow_position_sweeper,
 )
 
 from src.data.coverage import (
@@ -91,7 +95,7 @@ async def process_launch(
     slot,
 ):
 
-    
+
     async with PROCESSING_LIMIT:
         transaction = await fetch_transaction(
             signature
@@ -779,12 +783,50 @@ async def listen():
 
             await asyncio.sleep(2)
 
+async def run_market_collector() -> None:
+    #
+    # Restore persisted OPEN shadow positions
+    # before live market events can arrive.
+    #
+    tracked_mints = (
+        initialize_shadow_position_manager()
+    )
+
+    print(
+        "📒 SHADOW PORTFOLIO | "
+        f"{len(tracked_mints)} open position(s) restored"
+    )
+
+    #
+    # Exactly one periodic sweeper for the
+    # lifetime of this collector process.
+    #
+    sweeper_task = asyncio.create_task(
+        run_shadow_position_sweeper()
+    )
+
+    try:
+        await listen()
+
+    finally:
+        sweeper_task.cancel()
+
+        try:
+            await sweeper_task
+
+        except asyncio.CancelledError:
+            pass
+
+        print(
+            "🧹 Shadow position sweeper stopped."
+        )
 
 if __name__ == "__main__":
     try:
         asyncio.run(
-            listen()
+            run_market_collector()
         )
+
     except KeyboardInterrupt:
         print()
         print("🛑 Market Collector stopped.")

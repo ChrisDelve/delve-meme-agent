@@ -31,7 +31,7 @@ from src.strategies.shadow_exit_recovery import (
     plan_shadow_exit_recovery,
 )
 
-from src.strategies.shadow_position_manager import (
+from src.strategies.shadow_position_runtime import (
     SHADOW_EXIT_BASE_NETWORK_FEE_LAMPORTS,
     SHADOW_EXIT_PRIORITY_FEE_LAMPORTS,
     SHADOW_EXIT_SLIPPAGE_BPS,

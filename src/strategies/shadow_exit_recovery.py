@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.execution.exit_execution import (
+    normalize_pump_sell_execution,
+)
 from src.execution.pump_execution_simulator import (
     PumpCurveState,
 )
@@ -115,7 +118,13 @@ def plan_shadow_exit_recovery(
         )
     )
 
-    if full_simulation.executable:
+    full_execution = (
+        normalize_pump_sell_execution(
+            full_simulation
+        )
+    )
+
+    if full_execution.executable:
         return ShadowExitRecoveryPlan(
             recovery_version=(
                 SHADOW_EXIT_RECOVERY_VERSION
@@ -138,7 +147,7 @@ def plan_shadow_exit_recovery(
         )
 
     if (
-        full_simulation.ineligible_reason
+        full_execution.ineligible_reason
         != "INSUFFICIENT_REAL_QUOTE_RESERVES"
     ):
         return ShadowExitRecoveryPlan(
@@ -149,7 +158,7 @@ def plan_shadow_exit_recovery(
             action="UNKNOWN",
             reason=(
                 "FULL_SELL_FAILED:"
-                f"{full_simulation.ineligible_reason}"
+                f"{full_execution.ineligible_reason}"
             ),
 
             tokens_held=tokens_held,
@@ -250,10 +259,16 @@ def plan_shadow_exit_recovery(
             ),
         )
 
-    if (
-        partial_simulation.executable
-        and int(
+    partial_execution = (
+        normalize_pump_sell_execution(
             partial_simulation
+        )
+    )
+
+    if (
+        partial_execution.executable
+        and int(
+            partial_execution
             .net_wallet_proceeds_lamports
         ) > 0
     ):

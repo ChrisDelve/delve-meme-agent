@@ -48,6 +48,7 @@ class ShadowExitDecision:
     age_seconds: int
 
     entry_wallet_cost_lamports: int
+    cumulative_net_proceeds_lamports: int
     liquidation_value_lamports: int
 
     return_bps: float | None
@@ -107,6 +108,7 @@ def evaluate_shadow_exit(
     entry_timestamp: int,
 
     entry_wallet_cost_lamports: int,
+    cumulative_net_proceeds_lamports: int,
     liquidation_value_lamports: int,
 
     mark_status: str,
@@ -151,6 +153,10 @@ def evaluate_shadow_exit(
 
             entry_wallet_cost_lamports=int(
                 entry_wallet_cost_lamports
+            ),
+
+            cumulative_net_proceeds_lamports=int(
+                cumulative_net_proceeds_lamports
             ),
 
             liquidation_value_lamports=int(
@@ -198,6 +204,10 @@ def evaluate_shadow_exit(
                 entry_wallet_cost_lamports
             ),
 
+            cumulative_net_proceeds_lamports=int(
+                cumulative_net_proceeds_lamports
+            ),
+
             liquidation_value_lamports=int(
                 liquidation_value_lamports
             ),
@@ -237,6 +247,10 @@ def evaluate_shadow_exit(
                 entry_wallet_cost_lamports
             ),
 
+            cumulative_net_proceeds_lamports=int(
+                cumulative_net_proceeds_lamports
+            ),
+
             liquidation_value_lamports=int(
                 liquidation_value_lamports
             ),
@@ -245,6 +259,49 @@ def evaluate_shadow_exit(
 
             policy=policy,
         )
+
+    if (
+        cumulative_net_proceeds_lamports
+        < 0
+    ):
+        return ShadowExitDecision(
+            engine_version=(
+                EXIT_ENGINE_VERSION
+            ),
+
+            status=UNKNOWN,
+            reason=(
+                "INVALID_CUMULATIVE_NET_PROCEEDS"
+            ),
+
+            entry_timestamp=int(
+                entry_timestamp
+            ),
+
+            evaluated_at=int(
+                evaluated_at
+            ),
+
+            age_seconds=(
+                age_seconds
+            ),
+
+            entry_wallet_cost_lamports=int(
+                entry_wallet_cost_lamports
+            ),
+
+            cumulative_net_proceeds_lamports=int(
+                cumulative_net_proceeds_lamports
+            ),
+
+            liquidation_value_lamports=int(
+                liquidation_value_lamports
+            ),
+
+            return_bps=None,
+
+            policy=policy,
+    )
 
     #
     # Exit policy requires an executable
@@ -279,6 +336,10 @@ def evaluate_shadow_exit(
                 entry_wallet_cost_lamports
             ),
 
+            cumulative_net_proceeds_lamports=int(
+                cumulative_net_proceeds_lamports
+            ),
+
             liquidation_value_lamports=int(
                 liquidation_value_lamports
             ),
@@ -288,10 +349,17 @@ def evaluate_shadow_exit(
             policy=policy,
         )
 
-    pnl_lamports = (
+    hypothetical_total_recovery = (
         int(
+            cumulative_net_proceeds_lamports
+        )
+        + int(
             liquidation_value_lamports
         )
+    )
+
+    pnl_lamports = (
+        hypothetical_total_recovery
         - int(
             entry_wallet_cost_lamports
         )
@@ -379,6 +447,10 @@ def evaluate_shadow_exit(
 
         entry_wallet_cost_lamports=int(
             entry_wallet_cost_lamports
+        ),
+
+        cumulative_net_proceeds_lamports=int(
+            cumulative_net_proceeds_lamports
         ),
 
         liquidation_value_lamports=int(

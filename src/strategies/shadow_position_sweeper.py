@@ -401,6 +401,10 @@ async def sweep_shadow_position(
                 mark.entry_wallet_cost_lamports
             ),
 
+            cumulative_net_proceeds_lamports=int(
+                mark.cumulative_net_proceeds_lamports
+            ),
+
             liquidation_value_lamports=int(
                 mark.mark_value_lamports
             ),

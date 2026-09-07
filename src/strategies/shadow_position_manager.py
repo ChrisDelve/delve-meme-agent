@@ -505,6 +505,10 @@ async def process_shadow_position_event(
                 mark.entry_wallet_cost_lamports
             ),
 
+            cumulative_net_proceeds_lamports=int(
+                mark.cumulative_net_proceeds_lamports
+            ),
+
             liquidation_value_lamports=int(
                 mark.mark_value_lamports
             ),

@@ -468,6 +468,149 @@ def init_schema(
         """
     )
 
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS
+        shadow_position_exits (
+            id INTEGER PRIMARY KEY
+                AUTOINCREMENT,
+
+            position_id INTEGER NOT NULL,
+            exit_sequence INTEGER NOT NULL,
+
+            portfolio_version TEXT NOT NULL,
+            mint TEXT NOT NULL,
+
+            exit_kind TEXT NOT NULL,
+            exit_reason TEXT NOT NULL,
+            exit_timestamp INTEGER NOT NULL,
+
+            tokens_before INTEGER NOT NULL,
+            tokens_sold INTEGER NOT NULL,
+            tokens_after INTEGER NOT NULL,
+
+            remaining_exposure_before_lamports
+                INTEGER NOT NULL,
+
+            allocated_exposure_lamports
+                INTEGER NOT NULL,
+
+            remaining_exposure_after_lamports
+                INTEGER NOT NULL,
+
+            remaining_cost_basis_before_lamports
+                INTEGER NOT NULL,
+
+            allocated_cost_basis_lamports
+                INTEGER NOT NULL,
+
+            remaining_cost_basis_after_lamports
+                INTEGER NOT NULL,
+
+            protocol_fee_bps INTEGER,
+            creator_fee_bps INTEGER,
+
+            protocol_fee_lamports INTEGER,
+            creator_fee_lamports INTEGER,
+
+            slippage_bps INTEGER,
+
+            base_network_fee_lamports INTEGER,
+            priority_fee_lamports INTEGER,
+
+            transaction_overhead_lamports INTEGER,
+
+            gross_quote_lamports
+                INTEGER NOT NULL,
+
+            net_proceeds_lamports
+                INTEGER NOT NULL,
+
+            leg_realized_pnl_lamports
+                INTEGER NOT NULL,
+
+            cumulative_net_proceeds_after_lamports
+                INTEGER NOT NULL,
+
+            cumulative_realized_pnl_after_lamports
+                INTEGER NOT NULL,
+
+            sell_simulator_version TEXT,
+            all_in_exit_price_raw REAL,
+
+            pre_virtual_quote_reserves INTEGER,
+            pre_virtual_token_reserves INTEGER,
+            pre_real_quote_reserves INTEGER,
+            pre_real_token_reserves INTEGER,
+
+            post_virtual_quote_reserves INTEGER,
+            post_virtual_token_reserves INTEGER,
+            post_real_quote_reserves INTEGER,
+            post_real_token_reserves INTEGER,
+
+            created_at INTEGER NOT NULL,
+
+            FOREIGN KEY(position_id)
+                REFERENCES shadow_positions(id),
+
+            UNIQUE(
+                position_id,
+                exit_sequence
+            )
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_shadow_position_exits_mint
+        ON shadow_position_exits(
+            mint,
+            exit_timestamp
+        )
+        """
+    )
+
+    #
+    # Exit history is an append-only accounting
+    # ledger. Corrections must be represented by
+    # later accounting events, never by rewriting
+    # prior exits.
+    #
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        prevent_shadow_position_exits_update
+
+        BEFORE UPDATE
+        ON shadow_position_exits
+
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'shadow_position_exits is append-only'
+            );
+        END
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS
+        prevent_shadow_position_exits_delete
+
+        BEFORE DELETE
+        ON shadow_position_exits
+
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'shadow_position_exits is append-only'
+            );
+        END
+        """
+    )
 
 def parse_starting_equity() -> int:
     raw = os.getenv(

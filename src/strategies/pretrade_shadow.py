@@ -11,12 +11,17 @@ from src.execution.execution_quality_gate import (
     curve_state_from_live_curve,
     evaluate_execution_quality,
 )
+
 from src.execution.live_curve_state import (
-    resolve_live_pump_curve_state,
+    LivePumpCurveState,
 )
 
 from src.execution.live_fee_resolver import (
     resolve_live_event_fee_bps,
+)
+
+from src.execution.live_pump_fee_state import (
+    resolve_live_pump_fee_state,
 )
 
 from src.portfolio.shadow_portfolio import (
@@ -718,9 +723,9 @@ async def run_candidate(
         # Exact triggering trade fee regime.
         #
         (
-            fee_status,
-            protocol_fee_bps,
-            creator_fee_bps,
+            event_fee_status,
+            event_resolved_protocol_fee_bps,
+            event_resolved_creator_fee_bps,
         ) = resolve_live_event_fee_bps(
             quote_amount=int(
                 quote_amount
@@ -743,8 +748,9 @@ async def run_candidate(
             ),
         )
 
-        if not fee_status.startswith(
-            "RESOLVED"
+        if (
+            event_fee_status
+            == "SPECIAL_MAYHEM_AGENT_FEE_NOT_APPLICABLE"
         ):
             record = make_record(
                 entry_signature=(
@@ -783,7 +789,7 @@ async def run_candidate(
                     creator_fee_lamports
                 ),
                 fee_resolution_status=(
-                    fee_status
+                    event_fee_status
                 ),
                 protocol_fee_bps=None,
                 creator_fee_bps=None,
@@ -797,7 +803,7 @@ async def run_candidate(
                 live_curve_age_seconds=None,
                 final_status="UNKNOWN",
                 final_reasons=(
-                    f"FEE_REGIME_UNRESOLVED:{fee_status}",
+                    f"FEE_REGIME_UNRESOLVED:{event_fee_status}",
                 ),
                 scheduled_at=(
                     scheduled_at
@@ -876,13 +882,13 @@ async def run_candidate(
                     creator_fee_lamports
                 ),
                 fee_resolution_status=(
-                    fee_status
+                    event_fee_status
                 ),
                 protocol_fee_bps=(
-                    protocol_fee_bps
+                    event_resolved_protocol_fee_bps
                 ),
                 creator_fee_bps=(
-                    creator_fee_bps
+                    event_resolved_creator_fee_bps
                 ),
                 safety_status=(
                     safety.status
@@ -936,17 +942,74 @@ async def run_candidate(
             return
 
         #
-        # Fresh curve immediately before the
-        # hypothetical order.
+        # Authoritative current Pump execution state.
         #
-        live_curve = (
-            await resolve_live_pump_curve_state(
+        # Curve + FeeConfig are fetched together at
+        # one RPC context slot. Event-derived fees are
+        # evidence only; they never price our order.
+        #
+        fee_state = (
+            await resolve_live_pump_fee_state(
                 mint=mint,
                 min_context_slot=(
                     safety.snapshot.rpc_max_slot
                 ),
             )
         )
+
+        protocol_fee_bps = int(
+            fee_state.protocol_fee_bps
+        )
+
+        creator_fee_bps = int(
+            fee_state.creator_fee_bps
+        )
+
+        live_curve = LivePumpCurveState(
+            mint=mint,
+            curve=fee_state.curve,
+            rpc_slot=int(
+                fee_state.rpc_slot
+            ),
+            fetched_at=float(
+                fee_state.fetched_at
+            ),
+        )
+
+        if event_fee_status.startswith(
+            "RESOLVED"
+        ):
+            if (
+                event_resolved_protocol_fee_bps
+                == protocol_fee_bps
+                and event_resolved_creator_fee_bps
+                == creator_fee_bps
+            ):
+                fee_status = (
+                    "RESOLVED_ONCHAIN_EVENT_VERIFIED"
+                )
+
+            else:
+                fee_status = (
+                    "RESOLVED_ONCHAIN_EVENT_MISMATCH:"
+                    f"event="
+                    f"{event_resolved_protocol_fee_bps}/"
+                    f"{event_resolved_creator_fee_bps}:"
+                    f"chain="
+                    f"{protocol_fee_bps}/"
+                    f"{creator_fee_bps}:"
+                    f"slot={fee_state.rpc_slot}"
+                )
+
+        else:
+            fee_status = (
+                "RESOLVED_ONCHAIN_EVENT_UNRESOLVED:"
+                f"{event_fee_status}:"
+                f"chain="
+                f"{protocol_fee_bps}/"
+                f"{creator_fee_bps}:"
+                f"slot={fee_state.rpc_slot}"
+            )
 
                 #
         # Stage 1:

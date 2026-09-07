@@ -1894,22 +1894,29 @@ def close_shadow_position(
             )
         )
 
+        exit_execution = (
+            normalize_pump_sell_execution(
+                simulation
+            )
+        )
+
         gross_quote = int(
-            simulation.gross_quote_out
+            exit_execution.gross_quote_out
         )
 
         net_proceeds = int(
-            simulation.net_wallet_proceeds_lamports
+            exit_execution
+            .net_wallet_proceeds_lamports
         )
 
-        if not simulation.executable:
+        if not exit_execution.executable:
             connection.commit()
 
             return ShadowCloseResult(
                 status="UNEXITABLE",
                 reasons=(
                     "SELL_NOT_EXECUTABLE:"
-                    f"{simulation.ineligible_reason}",
+                    f"{exit_execution.ineligible_reason}",
                 ),
 
                 position_id=int(
@@ -1958,7 +1965,7 @@ def close_shadow_position(
         if (
             account_before.cash_balance_lamports
             < int(
-                simulation.total_transaction_overhead_lamports
+                exit_execution.total_transaction_overhead_lamports
             )
         ):
             connection.commit()
@@ -2439,45 +2446,42 @@ def close_shadow_position(
 
                 "protocol_fee_bps":
                     int(
-                        simulation.protocol_fee_bps
+                        exit_execution.protocol_fee_bps
                     ),
 
                 "creator_fee_bps":
                     int(
-                        simulation.creator_fee_bps
+                        exit_execution.creator_fee_bps
                     ),
 
                 "protocol_fee":
                     int(
-                        simulation.protocol_fee
+                        exit_execution.protocol_fee
                     ),
 
                 "creator_fee":
                     int(
-                        simulation.creator_fee
+                        exit_execution.creator_fee
                     ),
 
                 "slippage_bps":
                     int(
-                        simulation.slippage_bps
+                        exit_execution.slippage_bps
                     ),
 
                 "base_network_fee":
                     int(
-                        simulation
-                        .base_network_fee_lamports
+                        exit_execution.base_network_fee_lamports
                     ),
 
                 "priority_fee":
                     int(
-                        simulation
-                        .priority_fee_lamports
+                        exit_execution.priority_fee_lamports
                     ),
 
                 "transaction_overhead":
                     int(
-                        simulation
-                        .total_transaction_overhead_lamports
+                        exit_execution.total_transaction_overhead_lamports
                     ),
 
                 "gross_quote":
@@ -2496,12 +2500,11 @@ def close_shadow_position(
                     cumulative_realized_pnl_after,
 
                 "simulator_version":
-                    simulation.simulator_version,
+                    exit_execution.simulator_version,
 
                 "all_in_exit_price":
                     float(
-                        simulation
-                        .all_in_exit_price_raw
+                        exit_execution.all_in_exit_price_raw
                     ),
 
                 "pre_virtual_quote":

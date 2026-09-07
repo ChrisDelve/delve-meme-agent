@@ -105,6 +105,9 @@ class ShadowMarkResult:
     entry_timestamp: int | None
     entry_wallet_cost_lamports: int | None
 
+    remaining_cost_basis_lamports: int | None
+    cumulative_net_proceeds_lamports: int
+
     mark_value_lamports: int
     unrealized_pnl_lamports: int
 
@@ -241,6 +244,9 @@ def init_schema(
 
             tokens_held INTEGER NOT NULL,
 
+            remaining_exposure_lamports
+                INTEGER NOT NULL,
+
             remaining_cost_basis_lamports
                 INTEGER NOT NULL,
 
@@ -331,6 +337,31 @@ def init_schema(
             """
         ).fetchall()
     }
+
+    if (
+        "remaining_exposure_lamports"
+        not in position_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE shadow_positions
+            ADD COLUMN
+                remaining_exposure_lamports
+                INTEGER NOT NULL DEFAULT 0
+            """
+        )
+
+        connection.execute(
+            """
+            UPDATE shadow_positions
+            SET remaining_exposure_lamports =
+                CASE
+                    WHEN status = 'OPEN'
+                    THEN entry_spend_lamports
+                    ELSE 0
+                END
+            """
+        )
 
     if (
         "remaining_cost_basis_lamports"
@@ -580,7 +611,7 @@ def refresh_account(
             COUNT(*) AS open_positions,
 
             COALESCE(
-                SUM(entry_spend_lamports),
+                SUM(remaining_exposure_lamports),
                 0
             ) AS open_exposure,
 
@@ -1304,6 +1335,7 @@ def open_shadow_position(
                 entry_spend_lamports,
                 entry_wallet_cost_lamports,
                 tokens_held,
+                remaining_exposure_lamports,
                 remaining_cost_basis_lamports,
                 cumulative_net_proceeds_lamports,
                 cumulative_realized_pnl_lamports,
@@ -1330,7 +1362,7 @@ def open_shadow_position(
                     ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?
                 )
             """,
             (
@@ -1351,6 +1383,10 @@ def open_shadow_position(
 
                 int(
                     simulation.tokens_out
+                ),
+
+                int(
+                    simulation.spendable_quote_in
                 ),
 
                 wallet_cost,

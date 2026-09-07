@@ -588,6 +588,36 @@ def refresh_account(
     )
 
 
+def initialize_shadow_account(
+    *,
+    db_path: Path = DB_PATH,
+) -> ShadowAccountSnapshot:
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        account = refresh_account(
+            connection
+        )
+
+        connection.commit()
+
+        return account
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
 def to_risk_state(
     account: ShadowAccountSnapshot,
 ) -> AccountRiskState:

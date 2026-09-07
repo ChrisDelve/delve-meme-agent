@@ -48,6 +48,10 @@ from src.strategies.pretrade_shadow import (
     schedule_pretrade_shadow_candidate,
 )
 
+from src.portfolio.shadow_portfolio import (
+    initialize_shadow_account,
+)
+
 from src.strategies.model_shadow_signals import (
     record_model_shadow_prediction,
 )
@@ -784,6 +788,23 @@ async def listen():
             await asyncio.sleep(2)
 
 async def run_market_collector() -> None:
+    #
+    # Initialize and validate the shadow ledger
+    # before live market events can arrive.
+    #
+    shadow_account = (
+        initialize_shadow_account()
+    )
+
+    print(
+        "💰 SHADOW ACCOUNT | "
+        f"equity="
+        f"{shadow_account.current_equity_lamports / 1_000_000_000:.9f} SOL | "
+        f"cash="
+        f"{shadow_account.cash_balance_lamports / 1_000_000_000:.9f} SOL | "
+        f"open={shadow_account.open_positions}"
+    )
+
     #
     # Restore persisted OPEN shadow positions
     # before live market events can arrive.

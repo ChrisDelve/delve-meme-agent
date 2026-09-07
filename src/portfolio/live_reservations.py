@@ -7,6 +7,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.execution.simulation_fingerprint import (
+    simulation_fingerprint,
+)
+
 from src.execution.pump_execution_simulator import (
     PumpCurveState,
 )
@@ -21,7 +25,7 @@ from src.risk.risk_governor import (
 
 DB_PATH = Path("logs/delve_live.db")
 
-RESERVATION_VERSION = "live-capital-reservation-v1"
+RESERVATION_VERSION = "live-capital-reservation-v2"
 
 ACTIVE = "ACTIVE"
 SIGNED = "SIGNED"
@@ -45,6 +49,7 @@ class LiveCapitalReservation:
     status: str
 
     risk_governor_version: str
+    risk_simulation_sha256: str
 
     base_available_cash_lamports: int
     base_open_exposure_lamports: int
@@ -143,6 +148,8 @@ def init_schema(
 
             risk_governor_version TEXT NOT NULL,
 
+            risk_simulation_sha256 TEXT NOT NULL,
+
             base_available_cash_lamports
                 INTEGER NOT NULL,
 
@@ -183,6 +190,17 @@ def init_schema(
             """
         ).fetchall()
     }
+
+    if (
+        "risk_simulation_sha256"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN risk_simulation_sha256 TEXT
+            """
+        )
 
     if "signed_at" not in reservation_columns:
         connection.execute(
@@ -499,6 +517,25 @@ def reserve_pump_buy_capital(
                 risk_result=risk,
             )
 
+        try:
+            risk_simulation_sha256 = (
+                simulation_fingerprint(
+                    risk.recommended_simulation
+                )
+            )
+
+        except Exception:
+            connection.rollback()
+
+            return ReservationDecision(
+                status=UNKNOWN,
+                reasons=(
+                    "RISK_SIMULATION_FINGERPRINT_FAILED",
+                ),
+                reservation=None,
+                risk_result=risk,
+            )
+
         spend_lamports = int(
             risk.recommended_spend_lamports
         )
@@ -558,6 +595,9 @@ def reserve_pump_buy_capital(
             risk_governor_version=(
                 risk.governor_version
             ),
+            risk_simulation_sha256=(
+                risk_simulation_sha256
+            ),
             base_available_cash_lamports=(
                 available_cash_lamports
             ),
@@ -596,6 +636,7 @@ def reserve_pump_buy_capital(
                 wallet_cost_lamports,
                 status,
                 risk_governor_version,
+                risk_simulation_sha256,
                 base_available_cash_lamports,
                 base_open_exposure_lamports,
                 base_open_positions,
@@ -607,7 +648,7 @@ def reserve_pump_buy_capital(
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             (
@@ -619,6 +660,7 @@ def reserve_pump_buy_capital(
                 reservation.wallet_cost_lamports,
                 reservation.status,
                 reservation.risk_governor_version,
+                reservation.risk_simulation_sha256,
                 reservation.base_available_cash_lamports,
                 reservation.base_open_exposure_lamports,
                 reservation.base_open_positions,
@@ -669,6 +711,9 @@ def _row_to_reservation(
         risk_governor_version=str(
             row["risk_governor_version"]
         ),
+        risk_simulation_sha256=str(
+            row["risk_simulation_sha256"]
+        ),
         base_available_cash_lamports=int(
             row[
                 "base_available_cash_lamports"
@@ -714,6 +759,76 @@ def _row_to_reservation(
             )
         ),
     )
+
+
+def load_capital_reservation(
+    *,
+    reservation_id: str,
+    now: float | None = None,
+    db_path: Path = DB_PATH,
+) -> LiveCapitalReservation | None:
+    """
+    Return the current authoritative reservation
+    state from the live-capital ledger.
+
+    ACTIVE reservations whose TTL has elapsed are
+    expired atomically before the row is returned.
+    """
+
+    reservation_id = reservation_id.strip()
+
+    if not reservation_id:
+        return None
+
+    if now is None:
+        now = time.time()
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        init_schema(
+            connection
+        )
+
+        expire_active_reservations(
+            connection,
+            now=now,
+        )
+
+        row = connection.execute(
+            """
+            SELECT *
+
+            FROM live_capital_reservations
+
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        connection.commit()
+
+        if row is None:
+            return None
+
+        return _row_to_reservation(
+            row
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
 
 
 def bind_reservation_signed_transaction(

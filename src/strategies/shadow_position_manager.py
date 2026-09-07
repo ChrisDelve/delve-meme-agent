@@ -187,6 +187,12 @@ def _get_mint_lock(
 
     return lock
 
+def get_shadow_position_lock(
+    mint: str,
+) -> asyncio.Lock:
+    return _get_mint_lock(
+        mint
+    )
 
 async def process_shadow_position_event(
     *,

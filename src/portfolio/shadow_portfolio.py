@@ -8,6 +8,10 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from src.execution.exit_execution import (
+    ExitExecution,
+    normalize_pump_sell_execution,
+)
 from src.execution.pump_execution_simulator import (
     LAMPORTS_PER_SOL,
     PumpBuySimulation,
@@ -113,6 +117,10 @@ class ShadowMarkResult:
 
     sell_simulation: (
         PumpSellSimulation | None
+    )
+
+    exit_execution: (
+        ExitExecution | None
     )
 
     account: (
@@ -4853,6 +4861,7 @@ def mark_open_position(
                 mark_value_lamports=0,
                 unrealized_pnl_lamports=0,
                 sell_simulation=None,
+                exit_execution=None,
                 account=account,
             )
 
@@ -4892,15 +4901,22 @@ def mark_open_position(
             )
         )
 
+        exit_execution = (
+            normalize_pump_sell_execution(
+                simulation
+            )
+        )
+
         reasons: tuple[str, ...]
 
-        if simulation.executable:
+        if exit_execution.executable:
             status = "MARKED"
 
             reasons = ()
 
             mark_value = int(
-                simulation.net_wallet_proceeds_lamports
+                exit_execution
+                .net_wallet_proceeds_lamports
             )
 
         else:
@@ -4908,7 +4924,7 @@ def mark_open_position(
 
             reasons = (
                 "SELL_NOT_EXECUTABLE:"
-                f"{simulation.ineligible_reason}",
+                f"{exit_execution.ineligible_reason}",
             )
 
             #
@@ -5040,6 +5056,10 @@ def mark_open_position(
 
             sell_simulation=(
                 simulation
+            ),
+
+            exit_execution=(
+                exit_execution
             ),
 
             account=account,

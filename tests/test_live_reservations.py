@@ -9,9 +9,13 @@ from src.execution.pump_execution_simulator import (
 from src.portfolio.live_reservations import (
     ACTIVE,
     EXPIRED,
+    RELEASED,
+    SIGNED,
     SUBMITTED,
     get_connection,
     init_schema,
+    bind_reservation_signed_transaction,
+    release_active_reservation,
     reserve_pump_buy_capital,
 )
 from src.risk.risk_governor import (
@@ -421,6 +425,108 @@ class LiveReservationTests(unittest.TestCase):
             second.reasons,
         )
 
+    def test_signed_reservation_remains_held(
+        self,
+    ):
+        first = self.reserve(
+            "MintSignedHeld",
+            available_cash=50_000_000,
+        )
+
+        self.assertEqual(
+            first.status,
+            "PASS",
+        )
+
+        signed = bind_reservation_signed_transaction(
+            reservation_id=(
+                first.reservation
+                .reservation_id
+            ),
+            transaction_signature="SignedHeldSignature",
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            signed.status,
+            "PASS",
+        )
+
+        self.assertEqual(
+            signed.reservation.status,
+            SIGNED,
+        )
+
+        #
+        # Simulate the original pre-sign reservation
+        # TTL having elapsed.
+        #
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_capital_reservations
+                SET expires_at = 0
+                WHERE reservation_id = ?
+                """,
+                (
+                    first.reservation
+                    .reservation_id,
+                ),
+            )
+
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        second = self.reserve(
+            "MintAfterSignedHold",
+            available_cash=50_000_000,
+        )
+
+        self.assertEqual(
+            second.status,
+            "BLOCK",
+        )
+
+        self.assertIsNone(
+            second.reservation
+        )
+
+        self.assertIn(
+            "INSUFFICIENT_UNRESERVED_CASH",
+            second.reasons,
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            row = connection.execute(
+                """
+                SELECT status
+                FROM live_capital_reservations
+                WHERE reservation_id = ?
+                """,
+                (
+                    first.reservation
+                    .reservation_id,
+                ),
+            ).fetchone()
+
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            row["status"],
+            SIGNED,
+        )
+
     def test_submitted_reservation_remains_held(
         self,
     ):
@@ -644,6 +750,375 @@ class LiveReservationTests(unittest.TestCase):
             ),
             reservation
             .base_available_cash_lamports,
+        )
+
+
+    def test_bind_signed_transaction_is_idempotent(
+        self,
+    ):
+        result = self.reserve(
+            "MintSubmit"
+        )
+
+        self.assertEqual(
+            result.status,
+            "PASS",
+        )
+
+        first = bind_reservation_signed_transaction(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature="SignatureA",
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            first.status,
+            "PASS",
+        )
+
+        self.assertTrue(
+            first.changed
+        )
+
+        self.assertEqual(
+            first.reservation.status,
+            SIGNED,
+        )
+
+        self.assertEqual(
+            first.reservation
+            .transaction_signature,
+            "SignatureA",
+        )
+
+        self.assertIsNotNone(
+            first.reservation.signed_at
+        )
+
+        retry = bind_reservation_signed_transaction(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature="SignatureA",
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            retry.status,
+            "PASS",
+        )
+
+        self.assertFalse(
+            retry.changed
+        )
+
+        self.assertEqual(
+            retry.reservation
+            .transaction_signature,
+            "SignatureA",
+        )
+
+    def test_signed_signature_mismatch_blocks(
+        self,
+    ):
+        result = self.reserve(
+            "MintSubmitMismatch"
+        )
+
+        submitted = (
+            bind_reservation_signed_transaction(
+                reservation_id=(
+                    result.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    "SignatureOriginal"
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            submitted.status,
+            "PASS",
+        )
+
+        retry = bind_reservation_signed_transaction(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureDifferent"
+            ),
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            retry.status,
+            "BLOCK",
+        )
+
+        self.assertFalse(
+            retry.changed
+        )
+
+        self.assertIn(
+            "RESERVATION_SIGNATURE_MISMATCH",
+            retry.reasons,
+        )
+
+    def test_transaction_signature_unique_across_reservations(
+        self,
+    ):
+        first = self.reserve(
+            "MintSignatureA"
+        )
+
+        second = self.reserve(
+            "MintSignatureB"
+        )
+
+        self.assertEqual(
+            first.status,
+            "PASS",
+        )
+
+        self.assertEqual(
+            second.status,
+            "PASS",
+        )
+
+        first_submit = (
+            bind_reservation_signed_transaction(
+                reservation_id=(
+                    first.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    "SharedSignature"
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            first_submit.status,
+            "PASS",
+        )
+
+        second_submit = (
+            bind_reservation_signed_transaction(
+                reservation_id=(
+                    second.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    "SharedSignature"
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            second_submit.status,
+            "BLOCK",
+        )
+
+        self.assertFalse(
+            second_submit.changed
+        )
+
+        self.assertIn(
+            "TRANSACTION_SIGNATURE_ALREADY_BOUND",
+            second_submit.reasons,
+        )
+
+    def test_release_active_is_idempotent(
+        self,
+    ):
+        result = self.reserve(
+            "MintRelease"
+        )
+
+        first = release_active_reservation(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            reason="PRE_SUBMIT_ABORT",
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            first.status,
+            "PASS",
+        )
+
+        self.assertTrue(
+            first.changed
+        )
+
+        self.assertEqual(
+            first.reservation.status,
+            RELEASED,
+        )
+
+        retry = release_active_reservation(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            reason="PRE_SUBMIT_ABORT",
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            retry.status,
+            "PASS",
+        )
+
+        self.assertFalse(
+            retry.changed
+        )
+
+        mismatch = release_active_reservation(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            reason="DIFFERENT_REASON",
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            mismatch.status,
+            "BLOCK",
+        )
+
+        self.assertIn(
+            "RELEASE_REASON_MISMATCH",
+            mismatch.reasons,
+        )
+
+    def test_signed_cannot_generic_release(
+        self,
+    ):
+        result = self.reserve(
+            "MintSubmittedRelease"
+        )
+
+        submitted = (
+            bind_reservation_signed_transaction(
+                reservation_id=(
+                    result.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    "SignatureSubmitted"
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            submitted.status,
+            "PASS",
+        )
+
+        released = release_active_reservation(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            reason="TRY_RELEASE",
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            released.status,
+            "BLOCK",
+        )
+
+        self.assertFalse(
+            released.changed
+        )
+
+        self.assertEqual(
+            released.reservation.status,
+            SIGNED,
+        )
+
+        self.assertIn(
+            "SIGNED_RESERVATION_REQUIRES_RECONCILIATION",
+            released.reasons,
+        )
+
+    def test_expired_cannot_be_signed(
+        self,
+    ):
+        result = self.reserve(
+            "MintExpiredSubmit"
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_capital_reservations
+
+                SET expires_at = 0
+
+                WHERE reservation_id = ?
+                """,
+                (
+                    result.reservation
+                    .reservation_id,
+                ),
+            )
+
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        submitted = (
+            bind_reservation_signed_transaction(
+                reservation_id=(
+                    result.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    "TooLateSignature"
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            submitted.status,
+            "BLOCK",
+        )
+
+        self.assertFalse(
+            submitted.changed
+        )
+
+        self.assertEqual(
+            submitted.reservation.status,
+            EXPIRED,
+        )
+
+        self.assertIn(
+            "RESERVATION_NOT_ACTIVE",
+            submitted.reasons,
         )
 
 

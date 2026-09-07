@@ -24,6 +24,7 @@ DB_PATH = Path("logs/delve_live.db")
 RESERVATION_VERSION = "live-capital-reservation-v1"
 
 ACTIVE = "ACTIVE"
+SIGNED = "SIGNED"
 SUBMITTED = "SUBMITTED"
 RELEASED = "RELEASED"
 EXPIRED = "EXPIRED"
@@ -55,6 +56,18 @@ class LiveCapitalReservation:
 
     created_at: float
     expires_at: float
+
+    signed_at: float | None
+    transaction_signature: str | None
+
+
+@dataclass(frozen=True)
+class ReservationTransitionResult:
+    status: str
+    reasons: tuple[str, ...]
+
+    reservation: LiveCapitalReservation | None
+    changed: bool
 
 
 @dataclass(frozen=True)
@@ -151,8 +164,63 @@ def init_schema(
             created_at REAL NOT NULL,
             expires_at REAL NOT NULL,
 
+            signed_at REAL,
+            transaction_signature TEXT,
+
             terminal_at REAL,
             terminal_reason TEXT
+        )
+        """
+    )
+
+    reservation_columns = {
+        str(row["name"])
+        for row in connection.execute(
+            """
+            PRAGMA table_info(
+                live_capital_reservations
+            )
+            """
+        ).fetchall()
+    }
+
+    if "signed_at" not in reservation_columns:
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN signed_at REAL
+            """
+        )
+
+    if (
+        "transaction_signature"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN transaction_signature TEXT
+            """
+        )
+
+    connection.execute(
+        """
+        DROP INDEX IF EXISTS
+        live_capital_reservations_held_mint
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+        live_capital_reservations_held_mint_v2
+
+        ON live_capital_reservations (mint)
+
+        WHERE status IN (
+            'ACTIVE',
+            'SIGNED',
+            'SUBMITTED'
         )
         """
     )
@@ -160,12 +228,13 @@ def init_schema(
     connection.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS
-        live_capital_reservations_held_mint
-        ON live_capital_reservations (mint)
-        WHERE status IN (
-            'ACTIVE',
-            'SUBMITTED'
+        live_capital_reservations_transaction_signature
+
+        ON live_capital_reservations (
+            transaction_signature
         )
+
+        WHERE transaction_signature IS NOT NULL
         """
     )
 
@@ -231,10 +300,11 @@ def held_reservation_totals(
 
         FROM live_capital_reservations
 
-        WHERE status IN (?, ?)
+        WHERE status IN (?, ?, ?)
         """,
         (
             ACTIVE,
+            SIGNED,
             SUBMITTED,
         ),
     ).fetchone()
@@ -337,13 +407,14 @@ def reserve_pump_buy_capital(
             FROM live_capital_reservations
 
             WHERE mint = ?
-              AND status IN (?, ?)
+              AND status IN (?, ?, ?)
 
             LIMIT 1
             """,
             (
                 mint,
                 ACTIVE,
+                SIGNED,
                 SUBMITTED,
             ),
         ).fetchone()
@@ -510,6 +581,8 @@ def reserve_pump_buy_capital(
                 now
                 + reservation_ttl_seconds
             ),
+            signed_at=None,
+            transaction_signature=None,
         )
 
         connection.execute(
@@ -564,6 +637,503 @@ def reserve_pump_buy_capital(
             reasons=(),
             reservation=reservation,
             risk_result=risk,
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+def _row_to_reservation(
+    row: sqlite3.Row,
+) -> LiveCapitalReservation:
+    return LiveCapitalReservation(
+        reservation_id=str(
+            row["reservation_id"]
+        ),
+        reservation_version=str(
+            row["reservation_version"]
+        ),
+        mint=str(row["mint"]),
+        side=str(row["side"]),
+        spend_lamports=int(
+            row["spend_lamports"]
+        ),
+        wallet_cost_lamports=int(
+            row["wallet_cost_lamports"]
+        ),
+        status=str(row["status"]),
+        risk_governor_version=str(
+            row["risk_governor_version"]
+        ),
+        base_available_cash_lamports=int(
+            row[
+                "base_available_cash_lamports"
+            ]
+        ),
+        base_open_exposure_lamports=int(
+            row[
+                "base_open_exposure_lamports"
+            ]
+        ),
+        base_open_positions=int(
+            row["base_open_positions"]
+        ),
+        reserved_exposure_before_lamports=int(
+            row[
+                "reserved_exposure_before_lamports"
+            ]
+        ),
+        reserved_cash_before_lamports=int(
+            row[
+                "reserved_cash_before_lamports"
+            ]
+        ),
+        active_reservations_before=int(
+            row["active_reservations_before"]
+        ),
+        created_at=float(
+            row["created_at"]
+        ),
+        expires_at=float(
+            row["expires_at"]
+        ),
+        signed_at=(
+            None
+            if row["signed_at"] is None
+            else float(row["signed_at"])
+        ),
+        transaction_signature=(
+            None
+            if row["transaction_signature"] is None
+            else str(
+                row["transaction_signature"]
+            )
+        ),
+    )
+
+
+def bind_reservation_signed_transaction(
+    *,
+    reservation_id: str,
+    transaction_signature: str,
+    db_path: Path = DB_PATH,
+) -> ReservationTransitionResult:
+    """
+    Atomically bind an ACTIVE reservation to a
+    signed transaction BEFORE network submission.
+
+    Repeating the same transition with the same
+    signature is idempotent.
+
+    SIGNED reservations remain held and are not
+    automatically expired by reservation TTL.
+    """
+
+    reservation_id = reservation_id.strip()
+    transaction_signature = (
+        transaction_signature.strip()
+    )
+
+    if not reservation_id:
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_RESERVATION_ID",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    if not transaction_signature:
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_TRANSACTION_SIGNATURE",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    now = time.time()
+    connection = get_connection(db_path)
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        init_schema(connection)
+
+        expire_active_reservations(
+            connection,
+            now=now,
+        )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_NOT_FOUND",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        reservation = _row_to_reservation(
+            row
+        )
+
+        signature_owner = connection.execute(
+            """
+            SELECT reservation_id
+
+            FROM live_capital_reservations
+
+            WHERE transaction_signature = ?
+
+            LIMIT 1
+            """,
+            (
+                transaction_signature,
+            ),
+        ).fetchone()
+
+        if (
+            signature_owner is not None
+            and str(
+                signature_owner[
+                    "reservation_id"
+                ]
+            )
+            != reservation_id
+        ):
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "TRANSACTION_SIGNATURE_ALREADY_BOUND",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if reservation.status == SIGNED:
+            if (
+                reservation.transaction_signature
+                == transaction_signature
+            ):
+                connection.commit()
+
+                return (
+                    ReservationTransitionResult(
+                        status="PASS",
+                        reasons=(),
+                        reservation=reservation,
+                        changed=False,
+                    )
+                )
+
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_SIGNATURE_MISMATCH",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if reservation.status != ACTIVE:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_NOT_ACTIVE",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        updated = connection.execute(
+            """
+            UPDATE live_capital_reservations
+
+            SET
+                status = ?,
+                signed_at = ?,
+                transaction_signature = ?
+
+            WHERE reservation_id = ?
+              AND status = ?
+            """,
+            (
+                SIGNED,
+                now,
+                transaction_signature,
+                reservation_id,
+                ACTIVE,
+            ),
+        )
+
+        if updated.rowcount != 1:
+            connection.rollback()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "RESERVATION_SIGN_TRANSITION_FAILED",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        connection.commit()
+
+        return ReservationTransitionResult(
+            status="PASS",
+            reasons=(),
+            reservation=_row_to_reservation(
+                row
+            ),
+            changed=True,
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+def release_active_reservation(
+    *,
+    reservation_id: str,
+    reason: str,
+    db_path: Path = DB_PATH,
+) -> ReservationTransitionResult:
+    """
+    Release only a pre-submit ACTIVE reservation.
+
+    A SUBMITTED reservation cannot be released by
+    this function. It requires future transaction
+    reconciliation because the transaction may
+    still land on-chain.
+    """
+
+    reservation_id = reservation_id.strip()
+    reason = reason.strip()
+
+    if not reservation_id:
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_RESERVATION_ID",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    if not reason:
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_RELEASE_REASON",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    now = time.time()
+    connection = get_connection(db_path)
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        init_schema(connection)
+
+        expire_active_reservations(
+            connection,
+            now=now,
+        )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_NOT_FOUND",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        reservation = _row_to_reservation(
+            row
+        )
+
+        if reservation.status == RELEASED:
+            stored_reason = (
+                None
+                if row["terminal_reason"] is None
+                else str(
+                    row["terminal_reason"]
+                )
+            )
+
+            if stored_reason == reason:
+                connection.commit()
+
+                return ReservationTransitionResult(
+                    status="PASS",
+                    reasons=(),
+                    reservation=reservation,
+                    changed=False,
+                )
+
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RELEASE_REASON_MISMATCH",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if reservation.status in (
+            SIGNED,
+            SUBMITTED,
+        ):
+            reason_code = (
+                "SIGNED_RESERVATION_REQUIRES_RECONCILIATION"
+                if reservation.status == SIGNED
+                else
+                "SUBMITTED_RESERVATION_REQUIRES_RECONCILIATION"
+            )
+
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    reason_code,
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if reservation.status != ACTIVE:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_NOT_ACTIVE",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        updated = connection.execute(
+            """
+            UPDATE live_capital_reservations
+
+            SET
+                status = ?,
+                terminal_at = ?,
+                terminal_reason = ?
+
+            WHERE reservation_id = ?
+              AND status = ?
+            """,
+            (
+                RELEASED,
+                now,
+                reason,
+                reservation_id,
+                ACTIVE,
+            ),
+        )
+
+        if updated.rowcount != 1:
+            connection.rollback()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "RESERVATION_RELEASE_TRANSITION_FAILED",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        connection.commit()
+
+        return ReservationTransitionResult(
+            status="PASS",
+            reasons=(),
+            reservation=_row_to_reservation(
+                row
+            ),
+            changed=True,
         )
 
     except Exception:

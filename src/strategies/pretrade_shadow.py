@@ -24,6 +24,10 @@ from src.portfolio.shadow_portfolio import (
     preview_shadow_entry_risk,
 )
 
+from src.strategies.shadow_position_manager import (
+    register_open_shadow_mint,
+)
+
 from src.safety.token_safety_gate import (
     PASS as SAFETY_PASS,
     resolve_and_gate,
@@ -1217,9 +1221,12 @@ async def run_candidate(
                         portfolio_entry.status
                         == "PASS"
                     ):
+                        register_open_shadow_mint(
+                            mint
+                        )
+
                         decision_status = "PASS"
                         decision_reasons = ()
-
                     else:
                         decision_status = (
                             "REJECT"

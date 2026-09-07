@@ -12,6 +12,11 @@ from src.strategies.shadow_signals import (
     record_shadow_signal,
 )
 
+from src.strategies.shadow_position_manager import (
+    is_open_shadow_mint_tracked,
+    process_shadow_position_event,
+)
+
 from src.data.coverage import (
     close_coverage_interval,
     invalidate_stale_intervals,
@@ -170,6 +175,103 @@ async def process_launch_safe(
         print(f"Slot:      {slot}")
         print(f"Error:     {error!r}")
         print("=" * 70)
+
+async def process_shadow_position_event_safe(
+    trade_event,
+):
+    try:
+        result = (
+            await process_shadow_position_event(
+                mint=(
+                    trade_event["mint"]
+                ),
+
+                event_user=(
+                    trade_event.get(
+                        "user"
+                    )
+                ),
+
+                quote_amount=int(
+                    trade_event[
+                        "quote_amount"
+                    ]
+                ),
+
+                protocol_fee_lamports=(
+                    trade_event.get(
+                        "fee"
+                    )
+                ),
+
+                creator_fee_lamports=(
+                    trade_event.get(
+                        "creator_fee"
+                    )
+                ),
+
+                event_protocol_fee_bps=(
+                    trade_event.get(
+                        "fee_basis_points"
+                    )
+                ),
+
+                event_creator_fee_bps=(
+                    trade_event.get(
+                        "creator_fee_basis_points"
+                    )
+                ),
+
+                virtual_quote_reserves=int(
+                    trade_event[
+                        "virtual_sol_reserves"
+                    ]
+                ),
+
+                virtual_token_reserves=int(
+                    trade_event[
+                        "virtual_token_reserves"
+                    ]
+                ),
+
+                real_quote_reserves=int(
+                    trade_event[
+                        "real_sol_reserves"
+                    ]
+                ),
+
+                real_token_reserves=int(
+                    trade_event[
+                        "real_token_reserves"
+                    ]
+                ),
+
+                observed_at=int(
+                    time.time()
+                ),
+            )
+        )
+
+        if result.status == "CLOSED":
+            print(
+                "🔒 SHADOW POSITION CLOSED | "
+                f"mint={result.mint} | "
+                f"reason={result.reason}"
+            )
+
+        elif result.status == "UNKNOWN":
+            print(
+                "⚠️ SHADOW POSITION UNKNOWN | "
+                f"mint={result.mint} | "
+                f"reason={result.reason}"
+            )
+
+    except Exception as error:
+        print(
+            "⚠️ SHADOW POSITION ERROR | "
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
 
 async def process_buy(
     signature,
@@ -621,6 +723,23 @@ async def listen():
                             trade_event,
                         )
 
+                        #
+                        # Position management is BUY + SELL.
+                        # Only create a task when this mint
+                        # actually has an open shadow position.
+                        #
+                        if is_open_shadow_mint_tracked(
+                            trade_event["mint"]
+                        ):
+                            asyncio.create_task(
+                                process_shadow_position_event_safe(
+                                    trade_event
+                                )
+                            )
+
+                        #
+                        # Candidate generation remains BUY-only.
+                        #
                         if trade_event["is_buy"]:
                             process_buy_event(
                                 signature,

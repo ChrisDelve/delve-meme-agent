@@ -135,25 +135,12 @@ async def process_launch(
             first_seen_at=int(time.time()),
         )
 
-        counts = get_counts()
-
-        print()
-        print("🚀 LAUNCH SAVED")
-        print("=" * 70)
-        print(f"Name:       {decoded['name']}")
-        print(f"Ticker:     ${decoded['symbol']}")
-        print(f"Mint:       {decoded['mint']}")
-        print(f"Creator:    {decoded['creator']}")
-        print(f"Mayhem:     {decoded['mayhem_mode']}")
-        print(f"Slot:       {transaction.get('slot', slot)}")
-        print(f"Timestamp:  {block_time}")
-        print()
         print(
-            f"DB → {counts['launches']} launches | "
-            f"{counts['buys']} buys | "
-            f"{counts['wallets']} wallets"
+            "🚀 LAUNCH | "
+            f"${decoded['symbol']} | "
+            f"{decoded['mint']} | "
+            f"mayhem={decoded['mayhem_mode']}"
         )
-        print("=" * 70)
 
 async def process_launch_safe(
     signature,
@@ -560,37 +547,6 @@ def process_buy_event(
             f"{shadow_signal['alpha_score']:.2f}"
         )
 
-    print()
-    print("🦍 BUY SAVED")
-    print("=" * 70)
-    print(f"Wallet:    {trade_event['user']}")
-    print(f"Mint:      {trade_event['mint']}")
-    print(
-        f"SOL:       "
-        f"{trade_event['sol_amount'] / 1_000_000_000:.6f}"
-    )
-
-    if rank is None:
-        print("Rank:      waiting for launch record")
-    else:
-        print(f"Rank:      #{rank}")
-
-    if entry_age is None:
-        print("Entry Age: waiting for launch record")
-    else:
-        print(f"Entry Age: {entry_age} sec")
-
-    print(f"Mayhem:    {trade_event['mayhem_mode']}")
-
-    counts = get_counts()
-
-    print()
-    print(
-        f"DB → {counts['launches']} launches | "
-        f"{counts['buys']} buys | "
-        f"{counts['wallets']} wallets"
-    )
-    print("=" * 70)
 async def listen():
     init_db()
     invalidate_stale_intervals()
@@ -754,6 +710,16 @@ async def listen():
                                 slot,
                                 trade_event,
                             )
+
+                    #
+                    # Pump traffic can keep recv()
+                    # continuously ready. Explicitly
+                    # yield so websocket keepalive and
+                    # other asyncio tasks get scheduler
+                    # time between messages.
+                    #
+                    await asyncio.sleep(0)
+
                 close_coverage_interval(
                     coverage_interval_id,
                     "websocket_closed",

@@ -152,23 +152,6 @@ def save_trade_event(
     if not inserted:
         return
 
-    print()
-    print(
-        f"{'🟢' if side == 'BUY' else '🔴'} "
-        f"TRADE SAVED"
-    )
-    print("=" * 70)
-    print(f"Side:    {side}")
-    print(f"Wallet:  {trade_event['user']}")
-    print(f"Mint:    {trade_event['mint']}")
-    print(
-        f"SOL:     "
-        f"{trade_event['sol_amount'] / 1_000_000_000:.6f}"
-    )
-    print(f"Tokens:  {trade_event['token_amount']}")
-    print(f"Slot:    {slot}")
-    print("=" * 70)
-
 
 async def process_trade(
     signature,

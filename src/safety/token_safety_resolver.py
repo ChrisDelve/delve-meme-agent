@@ -728,12 +728,23 @@ def parse_token_account(
     *,
     account: dict | None,
     expected_mint: str,
+    expected_token_program: str,
+    expected_owner: str | None = None,
 ) -> tuple[
     str,
     int,
 ] | None:
     if account is None:
         return None
+
+    if (
+        account.get("owner")
+        != expected_token_program
+    ):
+        raise SafetyResolutionError(
+            "Token account program-owner "
+            "mismatch."
+        )
 
     data = account.get(
         "data"
@@ -804,15 +815,42 @@ def parse_token_account(
             "Incomplete parsed token account."
         )
 
-    return (
-        str(owner),
-        int(
+    owner_string = str(
+        owner
+    )
+
+    if (
+        expected_owner is not None
+        and owner_string
+        != expected_owner
+    ):
+        raise SafetyResolutionError(
+            "Token account authority mismatch."
+        )
+
+    try:
+        amount = int(
             token_amount[
                 "amount"
             ]
-        ),
-    )
+        )
+    except (
+        TypeError,
+        ValueError,
+    ) as error:
+        raise SafetyResolutionError(
+            "Invalid token-account amount."
+        ) from error
 
+    if amount < 0:
+        raise SafetyResolutionError(
+            "Negative token-account amount."
+        )
+
+    return (
+        owner_string,
+        amount,
+    )
 
 def pct(
     numerator: int,
@@ -1194,6 +1232,12 @@ async def resolve_token_safety(
             )
         ]
 
+        protocol_expected_owners = [
+            str(
+                bonding_curve_address
+            )
+        ]
+
         if curve.is_mayhem_mode:
             mayhem_token_vault = (
                 derive_associated_token_account(
@@ -1210,6 +1254,12 @@ async def resolve_token_safety(
             protocol_addresses.append(
                 str(
                     mayhem_token_vault
+                )
+            )
+
+            protocol_expected_owners.append(
+                str(
+                    MAYHEM_SOL_VAULT
                 )
             )
 
@@ -1258,9 +1308,17 @@ async def resolve_token_safety(
             else None
         )
 
-        if not isinstance(
-            protocol_values,
-            list,
+        if (
+            not isinstance(
+                protocol_values,
+                list,
+            )
+            or len(
+                protocol_values
+            )
+            != len(
+                protocol_addresses
+            )
         ):
             raise SafetyResolutionError(
                 "Protocol token account "
@@ -1269,8 +1327,12 @@ async def resolve_token_safety(
 
         protocol_inventory = 0
 
-        for account in (
-            protocol_values
+        for (
+            account,
+            expected_owner,
+        ) in zip(
+            protocol_values,
+            protocol_expected_owners,
         ):
             parsed_account = (
                 parse_token_account(
@@ -1278,20 +1340,31 @@ async def resolve_token_safety(
                     expected_mint=(
                         mint_string
                     ),
+                    expected_token_program=(
+                        token_program_string
+                    ),
+                    expected_owner=(
+                        expected_owner
+                    ),
                 )
             )
 
             if (
                 parsed_account
-                is not None
+                is None
             ):
-                _, amount = (
-                    parsed_account
+                raise SafetyResolutionError(
+                    "Required protocol token "
+                    "account does not exist."
                 )
 
-                protocol_inventory += (
-                    amount
-                )
+            _, amount = (
+                parsed_account
+            )
+
+            protocol_inventory += (
+                amount
+            )
 
         if (
             protocol_inventory
@@ -1317,19 +1390,46 @@ async def resolve_token_safety(
         # behind each of the 20 largest
         # token accounts.
         #
-        largest_addresses = [
-            item["address"]
-            for item in largest_values
+        for item in largest_values:
             if (
-                isinstance(
+                not isinstance(
                     item,
                     dict,
                 )
-                and item.get(
+                or not isinstance(
+                    item.get(
+                        "address"
+                    ),
+                    str,
+                )
+                or not item[
                     "address"
+                ]
+            ):
+                raise SafetyResolutionError(
+                    "Malformed largest-token-account "
+                    "entry."
+                )
+
+        largest_addresses = [
+            item["address"]
+            for item in largest_values
+        ]
+
+        if (
+            len(
+                set(
+                    largest_addresses
                 )
             )
-        ]
+            != len(
+                largest_addresses
+            )
+        ):
+            raise SafetyResolutionError(
+                "Duplicate largest-token-account "
+                "address."
+            )
 
         owner_balances: dict[
             str,
@@ -1409,6 +1509,9 @@ async def resolve_token_safety(
                         expected_mint=(
                             mint_string
                         ),
+                        expected_token_program=(
+                            token_program_string
+                        ),
                     )
                 )
 
@@ -1416,7 +1519,10 @@ async def resolve_token_safety(
                     parsed_account
                     is None
                 ):
-                    continue
+                    raise SafetyResolutionError(
+                        "Largest-holder token "
+                        "account disappeared."
+                    )
 
                 holder_owner, amount = (
                     parsed_account
@@ -1586,7 +1692,10 @@ async def resolve_token_safety(
                 item,
                 dict,
             ):
-                continue
+                raise SafetyResolutionError(
+                    "Malformed creator token-account "
+                    "entry."
+                )
 
             account = item.get(
                 "account"
@@ -1598,6 +1707,12 @@ async def resolve_token_safety(
                     expected_mint=(
                         mint_string
                     ),
+                    expected_token_program=(
+                        token_program_string
+                    ),
+                    expected_owner=(
+                        curve.creator
+                    ),
                 )
             )
 
@@ -1605,7 +1720,10 @@ async def resolve_token_safety(
                 parsed_account
                 is None
             ):
-                continue
+                raise SafetyResolutionError(
+                    "Creator token account "
+                    "disappeared."
+                )
 
             _, amount = (
                 parsed_account

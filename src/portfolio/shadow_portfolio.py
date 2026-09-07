@@ -147,6 +147,51 @@ class ShadowCloseResult:
         ShadowAccountSnapshot | None
     )
 
+@dataclass(frozen=True)
+class ShadowPartialCloseResult:
+    status: str
+    reasons: tuple[str, ...]
+
+    position_id: int | None
+    mint: str
+
+    exit_reason: str | None
+    exit_sequence: int | None
+
+    tokens_before: int
+    tokens_sold: int
+    tokens_after: int
+
+    allocated_exposure_lamports: int
+    allocated_cost_basis_lamports: int
+
+    remaining_exposure_lamports: int
+    remaining_cost_basis_lamports: int
+
+    gross_quote_lamports: int
+    net_proceeds_lamports: int
+
+    leg_realized_pnl_lamports: int
+
+    cumulative_net_proceeds_lamports: int
+    cumulative_realized_pnl_lamports: int
+
+    sell_simulation: (
+        PumpSellSimulation | None
+    )
+
+    residual_mark_simulation: (
+        PumpSellSimulation | None
+    )
+
+    account_before: (
+        ShadowAccountSnapshot | None
+    )
+
+    account_after: (
+        ShadowAccountSnapshot | None
+    )
+
 def utc_day_key(
     timestamp: float | None = None,
 ) -> str:
@@ -1918,6 +1963,12 @@ def close_shadow_position(
                 time.time()
             )
 
+        remaining_exposure_before = int(
+            position[
+                "remaining_exposure_lamports"
+            ]
+        )
+
         remaining_cost_basis = int(
             position[
                 "remaining_cost_basis_lamports"
@@ -1953,6 +2004,30 @@ def close_shadow_position(
 
         now = int(
             time.time()
+        )
+
+        sequence_row = connection.execute(
+            """
+            SELECT
+                COALESCE(
+                    MAX(exit_sequence),
+                    0
+                ) + 1 AS next_sequence
+
+            FROM shadow_position_exits
+            WHERE position_id = ?
+            """,
+            (
+                int(
+                    position["id"]
+                ),
+            ),
+        ).fetchone()
+
+        exit_sequence = int(
+            sequence_row[
+                "next_sequence"
+            ]
         )
 
         updated = connection.execute(
@@ -2154,6 +2229,286 @@ def close_shadow_position(
                 account_after=None,
             )
 
+        connection.execute(
+            """
+            INSERT INTO shadow_position_exits (
+                position_id,
+                exit_sequence,
+
+                portfolio_version,
+                mint,
+
+                exit_kind,
+                exit_reason,
+                exit_timestamp,
+
+                tokens_before,
+                tokens_sold,
+                tokens_after,
+
+                remaining_exposure_before_lamports,
+                allocated_exposure_lamports,
+                remaining_exposure_after_lamports,
+
+                remaining_cost_basis_before_lamports,
+                allocated_cost_basis_lamports,
+                remaining_cost_basis_after_lamports,
+
+                protocol_fee_bps,
+                creator_fee_bps,
+
+                protocol_fee_lamports,
+                creator_fee_lamports,
+
+                slippage_bps,
+
+                base_network_fee_lamports,
+                priority_fee_lamports,
+
+                transaction_overhead_lamports,
+
+                gross_quote_lamports,
+                net_proceeds_lamports,
+
+                leg_realized_pnl_lamports,
+
+                cumulative_net_proceeds_after_lamports,
+                cumulative_realized_pnl_after_lamports,
+
+                sell_simulator_version,
+                all_in_exit_price_raw,
+
+                pre_virtual_quote_reserves,
+                pre_virtual_token_reserves,
+                pre_real_quote_reserves,
+                pre_real_token_reserves,
+
+                post_virtual_quote_reserves,
+                post_virtual_token_reserves,
+                post_real_quote_reserves,
+                post_real_token_reserves,
+
+                created_at
+            )
+            VALUES (
+                :position_id,
+                :exit_sequence,
+
+                :portfolio_version,
+                :mint,
+
+                'FINAL',
+                :exit_reason,
+                :exit_timestamp,
+
+                :tokens_before,
+                :tokens_sold,
+                0,
+
+                :remaining_exposure_before,
+                :remaining_exposure_before,
+                0,
+
+                :remaining_basis_before,
+                :remaining_basis_before,
+                0,
+
+                :protocol_fee_bps,
+                :creator_fee_bps,
+
+                :protocol_fee,
+                :creator_fee,
+
+                :slippage_bps,
+
+                :base_network_fee,
+                :priority_fee,
+
+                :transaction_overhead,
+
+                :gross_quote,
+                :net_proceeds,
+
+                :leg_realized,
+
+                :cumulative_net_after,
+                :cumulative_realized_after,
+
+                :simulator_version,
+                :all_in_exit_price,
+
+                :pre_virtual_quote,
+                :pre_virtual_token,
+                :pre_real_quote,
+                :pre_real_token,
+
+                :post_virtual_quote,
+                :post_virtual_token,
+                :post_real_quote,
+                :post_real_token,
+
+                :created_at
+            )
+            """,
+            {
+                "position_id":
+                    int(
+                        position["id"]
+                    ),
+
+                "exit_sequence":
+                    exit_sequence,
+
+                "portfolio_version":
+                    str(
+                        position[
+                            "portfolio_version"
+                        ]
+                    ),
+
+                "mint":
+                    mint,
+
+                "exit_reason":
+                    exit_reason.strip(),
+
+                "exit_timestamp":
+                    int(
+                        exit_timestamp
+                    ),
+
+                "tokens_before":
+                    tokens_held,
+
+                "tokens_sold":
+                    tokens_held,
+
+                "remaining_exposure_before":
+                    remaining_exposure_before,
+
+                "remaining_basis_before":
+                    remaining_cost_basis,
+
+                "protocol_fee_bps":
+                    int(
+                        simulation.protocol_fee_bps
+                    ),
+
+                "creator_fee_bps":
+                    int(
+                        simulation.creator_fee_bps
+                    ),
+
+                "protocol_fee":
+                    int(
+                        simulation.protocol_fee
+                    ),
+
+                "creator_fee":
+                    int(
+                        simulation.creator_fee
+                    ),
+
+                "slippage_bps":
+                    int(
+                        simulation.slippage_bps
+                    ),
+
+                "base_network_fee":
+                    int(
+                        simulation
+                        .base_network_fee_lamports
+                    ),
+
+                "priority_fee":
+                    int(
+                        simulation
+                        .priority_fee_lamports
+                    ),
+
+                "transaction_overhead":
+                    int(
+                        simulation
+                        .total_transaction_overhead_lamports
+                    ),
+
+                "gross_quote":
+                    gross_quote,
+
+                "net_proceeds":
+                    net_proceeds,
+
+                "leg_realized":
+                    leg_realized_pnl,
+
+                "cumulative_net_after":
+                    cumulative_net_proceeds_after,
+
+                "cumulative_realized_after":
+                    cumulative_realized_pnl_after,
+
+                "simulator_version":
+                    simulation.simulator_version,
+
+                "all_in_exit_price":
+                    float(
+                        simulation
+                        .all_in_exit_price_raw
+                    ),
+
+                "pre_virtual_quote":
+                    int(
+                        simulation
+                        .pre_virtual_quote_reserves
+                    ),
+
+                "pre_virtual_token":
+                    int(
+                        simulation
+                        .pre_virtual_token_reserves
+                    ),
+
+                "pre_real_quote":
+                    int(
+                        simulation
+                        .pre_real_quote_reserves
+                    ),
+
+                "pre_real_token":
+                    int(
+                        simulation
+                        .pre_real_token_reserves
+                    ),
+
+                "post_virtual_quote":
+                    int(
+                        simulation
+                        .post_virtual_quote_reserves
+                    ),
+
+                "post_virtual_token":
+                    int(
+                        simulation
+                        .post_virtual_token_reserves
+                    ),
+
+                "post_real_quote":
+                    int(
+                        simulation
+                        .post_real_quote_reserves
+                    ),
+
+                "post_real_token":
+                    int(
+                        simulation
+                        .post_real_token_reserves
+                    ),
+
+                "created_at":
+                    now,
+            },
+        )
+
         account_after = (
             refresh_account(
                 connection
@@ -2194,6 +2549,1265 @@ def close_shadow_position(
 
             sell_simulation=(
                 simulation
+            ),
+
+            account_before=(
+                account_before
+            ),
+
+            account_after=(
+                account_after
+            ),
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+def partial_close_shadow_position(
+    *,
+    mint: str,
+    exit_reason: str,
+    tokens_to_sell: int,
+
+    curve_state: PumpCurveState,
+
+    protocol_fee_bps: int,
+    creator_fee_bps: int,
+
+    slippage_bps: int,
+    base_network_fee_lamports: int,
+    priority_fee_lamports: int,
+
+    exit_timestamp: int | None = None,
+
+    db_path: Path = DB_PATH,
+) -> ShadowPartialCloseResult:
+
+    if not exit_reason.strip():
+        raise ValueError(
+            "exit_reason must not be empty."
+        )
+
+    if int(tokens_to_sell) <= 0:
+        raise ValueError(
+            "tokens_to_sell must be positive."
+        )
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        ensure_account(
+            connection
+        )
+
+        account_before = refresh_account(
+            connection
+        )
+
+        position = connection.execute(
+            """
+            SELECT *
+            FROM shadow_positions
+            WHERE mint = ?
+              AND status = 'OPEN'
+            LIMIT 1
+            """,
+            (
+                mint,
+            ),
+        ).fetchone()
+
+        if position is None:
+            connection.commit()
+
+            return ShadowPartialCloseResult(
+                status="NO_POSITION",
+                reasons=(),
+
+                position_id=None,
+                mint=mint,
+
+                exit_reason=None,
+                exit_sequence=None,
+
+                tokens_before=0,
+                tokens_sold=0,
+                tokens_after=0,
+
+                allocated_exposure_lamports=0,
+                allocated_cost_basis_lamports=0,
+
+                remaining_exposure_lamports=0,
+                remaining_cost_basis_lamports=0,
+
+                gross_quote_lamports=0,
+                net_proceeds_lamports=0,
+
+                leg_realized_pnl_lamports=0,
+
+                cumulative_net_proceeds_lamports=0,
+                cumulative_realized_pnl_lamports=0,
+
+                sell_simulation=None,
+                residual_mark_simulation=None,
+
+                account_before=account_before,
+                account_after=account_before,
+            )
+
+        position_id = int(
+            position["id"]
+        )
+
+        tokens_before = int(
+            position[
+                "tokens_held"
+            ]
+        )
+
+        remaining_exposure_before = int(
+            position[
+                "remaining_exposure_lamports"
+            ]
+        )
+
+        remaining_cost_basis_before = int(
+            position[
+                "remaining_cost_basis_lamports"
+            ]
+        )
+
+        cumulative_net_proceeds_before = int(
+            position[
+                "cumulative_net_proceeds_lamports"
+            ]
+        )
+
+        cumulative_realized_pnl_before = int(
+            position[
+                "cumulative_realized_pnl_lamports"
+            ]
+        )
+
+        if tokens_before <= 0:
+            connection.rollback()
+
+            return ShadowPartialCloseResult(
+                status="UNKNOWN",
+                reasons=(
+                    "OPEN_POSITION_HAS_NO_TOKENS",
+                ),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_reason=exit_reason,
+                exit_sequence=None,
+
+                tokens_before=tokens_before,
+                tokens_sold=0,
+                tokens_after=tokens_before,
+
+                allocated_exposure_lamports=0,
+                allocated_cost_basis_lamports=0,
+
+                remaining_exposure_lamports=(
+                    remaining_exposure_before
+                ),
+
+                remaining_cost_basis_lamports=(
+                    remaining_cost_basis_before
+                ),
+
+                gross_quote_lamports=0,
+                net_proceeds_lamports=0,
+
+                leg_realized_pnl_lamports=0,
+
+                cumulative_net_proceeds_lamports=(
+                    cumulative_net_proceeds_before
+                ),
+
+                cumulative_realized_pnl_lamports=(
+                    cumulative_realized_pnl_before
+                ),
+
+                sell_simulation=None,
+                residual_mark_simulation=None,
+
+                account_before=account_before,
+                account_after=None,
+            )
+
+        if (
+            remaining_exposure_before < 0
+            or remaining_cost_basis_before < 0
+            or cumulative_net_proceeds_before < 0
+        ):
+            connection.rollback()
+
+            return ShadowPartialCloseResult(
+                status="UNKNOWN",
+                reasons=(
+                    "INVALID_RESIDUAL_ACCOUNTING_STATE",
+                ),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_reason=exit_reason,
+                exit_sequence=None,
+
+                tokens_before=tokens_before,
+                tokens_sold=0,
+                tokens_after=tokens_before,
+
+                allocated_exposure_lamports=0,
+                allocated_cost_basis_lamports=0,
+
+                remaining_exposure_lamports=(
+                    remaining_exposure_before
+                ),
+
+                remaining_cost_basis_lamports=(
+                    remaining_cost_basis_before
+                ),
+
+                gross_quote_lamports=0,
+                net_proceeds_lamports=0,
+
+                leg_realized_pnl_lamports=0,
+
+                cumulative_net_proceeds_lamports=(
+                    cumulative_net_proceeds_before
+                ),
+
+                cumulative_realized_pnl_lamports=(
+                    cumulative_realized_pnl_before
+                ),
+
+                sell_simulation=None,
+                residual_mark_simulation=None,
+
+                account_before=account_before,
+                account_after=None,
+            )
+
+        tokens_to_sell = int(
+            tokens_to_sell
+        )
+
+        if tokens_to_sell >= tokens_before:
+            connection.commit()
+
+            return ShadowPartialCloseResult(
+                status="BLOCK",
+                reasons=(
+                    "PARTIAL_SELL_MUST_LEAVE_RESIDUAL_TOKENS",
+                ),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_reason=exit_reason,
+                exit_sequence=None,
+
+                tokens_before=tokens_before,
+                tokens_sold=0,
+                tokens_after=tokens_before,
+
+                allocated_exposure_lamports=0,
+                allocated_cost_basis_lamports=0,
+
+                remaining_exposure_lamports=(
+                    remaining_exposure_before
+                ),
+
+                remaining_cost_basis_lamports=(
+                    remaining_cost_basis_before
+                ),
+
+                gross_quote_lamports=0,
+                net_proceeds_lamports=0,
+
+                leg_realized_pnl_lamports=0,
+
+                cumulative_net_proceeds_lamports=(
+                    cumulative_net_proceeds_before
+                ),
+
+                cumulative_realized_pnl_lamports=(
+                    cumulative_realized_pnl_before
+                ),
+
+                sell_simulation=None,
+                residual_mark_simulation=None,
+
+                account_before=account_before,
+                account_after=account_before,
+            )
+
+        simulation = (
+            calculate_exact_input_sell(
+                state=curve_state,
+
+                tokens_in=(
+                    tokens_to_sell
+                ),
+
+                protocol_fee_bps=int(
+                    protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    creator_fee_bps
+                ),
+
+                slippage_bps=int(
+                    slippage_bps
+                ),
+
+                base_network_fee_lamports=int(
+                    base_network_fee_lamports
+                ),
+
+                priority_fee_lamports=int(
+                    priority_fee_lamports
+                ),
+            )
+        )
+
+        gross_quote = int(
+            simulation.gross_quote_out
+        )
+
+        net_proceeds = int(
+            simulation.net_wallet_proceeds_lamports
+        )
+
+        if not simulation.executable:
+            connection.commit()
+
+            return ShadowPartialCloseResult(
+                status="UNEXITABLE",
+                reasons=(
+                    "SELL_NOT_EXECUTABLE:"
+                    f"{simulation.ineligible_reason}",
+                ),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_reason=exit_reason,
+                exit_sequence=None,
+
+                tokens_before=tokens_before,
+                tokens_sold=0,
+                tokens_after=tokens_before,
+
+                allocated_exposure_lamports=0,
+                allocated_cost_basis_lamports=0,
+
+                remaining_exposure_lamports=(
+                    remaining_exposure_before
+                ),
+
+                remaining_cost_basis_lamports=(
+                    remaining_cost_basis_before
+                ),
+
+                gross_quote_lamports=(
+                    gross_quote
+                ),
+
+                net_proceeds_lamports=(
+                    net_proceeds
+                ),
+
+                leg_realized_pnl_lamports=0,
+
+                cumulative_net_proceeds_lamports=(
+                    cumulative_net_proceeds_before
+                ),
+
+                cumulative_realized_pnl_lamports=(
+                    cumulative_realized_pnl_before
+                ),
+
+                sell_simulation=simulation,
+                residual_mark_simulation=None,
+
+                account_before=account_before,
+                account_after=account_before,
+            )
+
+        if net_proceeds <= 0:
+            connection.commit()
+
+            return ShadowPartialCloseResult(
+                status="BLOCK",
+                reasons=(
+                    "PARTIAL_SELL_HAS_NO_POSITIVE_RECOVERY",
+                ),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_reason=exit_reason,
+                exit_sequence=None,
+
+                tokens_before=tokens_before,
+                tokens_sold=0,
+                tokens_after=tokens_before,
+
+                allocated_exposure_lamports=0,
+                allocated_cost_basis_lamports=0,
+
+                remaining_exposure_lamports=(
+                    remaining_exposure_before
+                ),
+
+                remaining_cost_basis_lamports=(
+                    remaining_cost_basis_before
+                ),
+
+                gross_quote_lamports=(
+                    gross_quote
+                ),
+
+                net_proceeds_lamports=(
+                    net_proceeds
+                ),
+
+                leg_realized_pnl_lamports=0,
+
+                cumulative_net_proceeds_lamports=(
+                    cumulative_net_proceeds_before
+                ),
+
+                cumulative_realized_pnl_lamports=(
+                    cumulative_realized_pnl_before
+                ),
+
+                sell_simulation=simulation,
+                residual_mark_simulation=None,
+
+                account_before=account_before,
+                account_after=account_before,
+            )
+
+        if (
+            account_before.cash_balance_lamports
+            < int(
+                simulation.total_transaction_overhead_lamports
+            )
+        ):
+            connection.commit()
+
+            return ShadowPartialCloseResult(
+                status="BLOCK",
+                reasons=(
+                    "INSUFFICIENT_CASH_FOR_EXIT_OVERHEAD",
+                ),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_reason=exit_reason,
+                exit_sequence=None,
+
+                tokens_before=tokens_before,
+                tokens_sold=0,
+                tokens_after=tokens_before,
+
+                allocated_exposure_lamports=0,
+                allocated_cost_basis_lamports=0,
+
+                remaining_exposure_lamports=(
+                    remaining_exposure_before
+                ),
+
+                remaining_cost_basis_lamports=(
+                    remaining_cost_basis_before
+                ),
+
+                gross_quote_lamports=(
+                    gross_quote
+                ),
+
+                net_proceeds_lamports=(
+                    net_proceeds
+                ),
+
+                leg_realized_pnl_lamports=0,
+
+                cumulative_net_proceeds_lamports=(
+                    cumulative_net_proceeds_before
+                ),
+
+                cumulative_realized_pnl_lamports=(
+                    cumulative_realized_pnl_before
+                ),
+
+                sell_simulation=simulation,
+                residual_mark_simulation=None,
+
+                account_before=account_before,
+                account_after=account_before,
+            )
+
+        tokens_after = (
+            tokens_before
+            - tokens_to_sell
+        )
+
+        allocated_exposure = (
+            remaining_exposure_before
+            * tokens_to_sell
+            // tokens_before
+        )
+
+        allocated_cost_basis = (
+            remaining_cost_basis_before
+            * tokens_to_sell
+            // tokens_before
+        )
+
+        remaining_exposure_after = (
+            remaining_exposure_before
+            - allocated_exposure
+        )
+
+        remaining_cost_basis_after = (
+            remaining_cost_basis_before
+            - allocated_cost_basis
+        )
+
+        leg_realized_pnl = (
+            net_proceeds
+            - allocated_cost_basis
+        )
+
+        cumulative_net_proceeds_after = (
+            cumulative_net_proceeds_before
+            + net_proceeds
+        )
+
+        cumulative_realized_pnl_after = (
+            cumulative_realized_pnl_before
+            + leg_realized_pnl
+        )
+
+        post_sell_curve = PumpCurveState(
+            virtual_quote_reserves=int(
+                simulation.post_virtual_quote_reserves
+            ),
+
+            virtual_token_reserves=int(
+                simulation.post_virtual_token_reserves
+            ),
+
+            real_quote_reserves=int(
+                simulation.post_real_quote_reserves
+            ),
+
+            real_token_reserves=int(
+                simulation.post_real_token_reserves
+            ),
+        )
+
+        residual_mark_simulation = (
+            calculate_exact_input_sell(
+                state=post_sell_curve,
+
+                tokens_in=(
+                    tokens_after
+                ),
+
+                protocol_fee_bps=int(
+                    protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    creator_fee_bps
+                ),
+
+                slippage_bps=int(
+                    slippage_bps
+                ),
+
+                base_network_fee_lamports=int(
+                    base_network_fee_lamports
+                ),
+
+                priority_fee_lamports=int(
+                    priority_fee_lamports
+                ),
+            )
+        )
+
+        if residual_mark_simulation.executable:
+            residual_mark_value = int(
+                residual_mark_simulation
+                .net_wallet_proceeds_lamports
+            )
+        else:
+            residual_mark_value = 0
+
+        residual_unrealized_pnl = (
+            residual_mark_value
+            - remaining_cost_basis_after
+        )
+
+        if exit_timestamp is None:
+            exit_timestamp = int(
+                time.time()
+            )
+
+        now = int(
+            time.time()
+        )
+
+        sequence_row = connection.execute(
+            """
+            SELECT
+                COALESCE(
+                    MAX(exit_sequence),
+                    0
+                ) + 1 AS next_sequence
+
+            FROM shadow_position_exits
+            WHERE position_id = ?
+            """,
+            (
+                position_id,
+            ),
+        ).fetchone()
+
+        exit_sequence = int(
+            sequence_row[
+                "next_sequence"
+            ]
+        )
+
+        updated = connection.execute(
+            """
+            UPDATE shadow_positions
+
+            SET
+                tokens_held = :tokens_after,
+
+                remaining_exposure_lamports =
+                    :remaining_exposure_after,
+
+                remaining_cost_basis_lamports =
+                    :remaining_cost_basis_after,
+
+                cumulative_net_proceeds_lamports =
+                    :cumulative_net_after,
+
+                cumulative_realized_pnl_lamports =
+                    :cumulative_realized_after,
+
+                latest_mark_value_lamports =
+                    :residual_mark_value,
+
+                unrealized_pnl_lamports =
+                    :residual_unrealized_pnl,
+
+                latest_virtual_quote_reserves =
+                    :virtual_quote,
+
+                latest_virtual_token_reserves =
+                    :virtual_token,
+
+                latest_real_quote_reserves =
+                    :real_quote,
+
+                latest_real_token_reserves =
+                    :real_token,
+
+                latest_mark_timestamp =
+                    :mark_timestamp,
+
+                updated_at =
+                    :updated_at
+
+            WHERE id = :position_id
+              AND status = 'OPEN'
+              AND tokens_held = :tokens_before
+            """,
+            {
+                "tokens_after":
+                    tokens_after,
+
+                "remaining_exposure_after":
+                    remaining_exposure_after,
+
+                "remaining_cost_basis_after":
+                    remaining_cost_basis_after,
+
+                "cumulative_net_after":
+                    cumulative_net_proceeds_after,
+
+                "cumulative_realized_after":
+                    cumulative_realized_pnl_after,
+
+                "residual_mark_value":
+                    residual_mark_value,
+
+                "residual_unrealized_pnl":
+                    residual_unrealized_pnl,
+
+                "virtual_quote":
+                    int(
+                        simulation
+                        .post_virtual_quote_reserves
+                    ),
+
+                "virtual_token":
+                    int(
+                        simulation
+                        .post_virtual_token_reserves
+                    ),
+
+                "real_quote":
+                    int(
+                        simulation
+                        .post_real_quote_reserves
+                    ),
+
+                "real_token":
+                    int(
+                        simulation
+                        .post_real_token_reserves
+                    ),
+
+                "mark_timestamp":
+                    int(
+                        exit_timestamp
+                    ),
+
+                "updated_at":
+                    now,
+
+                "position_id":
+                    position_id,
+
+                "tokens_before":
+                    tokens_before,
+            },
+        )
+
+        if updated.rowcount != 1:
+            connection.rollback()
+
+            return ShadowPartialCloseResult(
+                status="UNKNOWN",
+                reasons=(
+                    "PARTIAL_POSITION_STATE_CHANGED",
+                ),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_reason=exit_reason,
+                exit_sequence=None,
+
+                tokens_before=tokens_before,
+                tokens_sold=0,
+                tokens_after=tokens_before,
+
+                allocated_exposure_lamports=0,
+                allocated_cost_basis_lamports=0,
+
+                remaining_exposure_lamports=(
+                    remaining_exposure_before
+                ),
+
+                remaining_cost_basis_lamports=(
+                    remaining_cost_basis_before
+                ),
+
+                gross_quote_lamports=(
+                    gross_quote
+                ),
+
+                net_proceeds_lamports=(
+                    net_proceeds
+                ),
+
+                leg_realized_pnl_lamports=0,
+
+                cumulative_net_proceeds_lamports=(
+                    cumulative_net_proceeds_before
+                ),
+
+                cumulative_realized_pnl_lamports=(
+                    cumulative_realized_pnl_before
+                ),
+
+                sell_simulation=simulation,
+                residual_mark_simulation=(
+                    residual_mark_simulation
+                ),
+
+                account_before=account_before,
+                account_after=None,
+            )
+
+        cash_updated = connection.execute(
+            """
+            UPDATE shadow_account
+
+            SET
+                cash_balance_lamports =
+                    cash_balance_lamports + ?,
+
+                updated_at = ?
+
+            WHERE id = 1
+            """,
+            (
+                net_proceeds,
+                now,
+            ),
+        )
+
+        if cash_updated.rowcount != 1:
+            connection.rollback()
+
+            return ShadowPartialCloseResult(
+                status="UNKNOWN",
+                reasons=(
+                    "SHADOW_ACCOUNT_UPDATE_FAILED",
+                ),
+
+                position_id=position_id,
+                mint=mint,
+
+                exit_reason=exit_reason,
+                exit_sequence=None,
+
+                tokens_before=tokens_before,
+                tokens_sold=0,
+                tokens_after=tokens_before,
+
+                allocated_exposure_lamports=0,
+                allocated_cost_basis_lamports=0,
+
+                remaining_exposure_lamports=(
+                    remaining_exposure_before
+                ),
+
+                remaining_cost_basis_lamports=(
+                    remaining_cost_basis_before
+                ),
+
+                gross_quote_lamports=(
+                    gross_quote
+                ),
+
+                net_proceeds_lamports=(
+                    net_proceeds
+                ),
+
+                leg_realized_pnl_lamports=0,
+
+                cumulative_net_proceeds_lamports=(
+                    cumulative_net_proceeds_before
+                ),
+
+                cumulative_realized_pnl_lamports=(
+                    cumulative_realized_pnl_before
+                ),
+
+                sell_simulation=simulation,
+                residual_mark_simulation=(
+                    residual_mark_simulation
+                ),
+
+                account_before=account_before,
+                account_after=None,
+            )
+
+        connection.execute(
+            """
+            INSERT INTO shadow_position_exits (
+                position_id,
+                exit_sequence,
+
+                portfolio_version,
+                mint,
+
+                exit_kind,
+                exit_reason,
+                exit_timestamp,
+
+                tokens_before,
+                tokens_sold,
+                tokens_after,
+
+                remaining_exposure_before_lamports,
+                allocated_exposure_lamports,
+                remaining_exposure_after_lamports,
+
+                remaining_cost_basis_before_lamports,
+                allocated_cost_basis_lamports,
+                remaining_cost_basis_after_lamports,
+
+                protocol_fee_bps,
+                creator_fee_bps,
+
+                protocol_fee_lamports,
+                creator_fee_lamports,
+
+                slippage_bps,
+
+                base_network_fee_lamports,
+                priority_fee_lamports,
+
+                transaction_overhead_lamports,
+
+                gross_quote_lamports,
+                net_proceeds_lamports,
+
+                leg_realized_pnl_lamports,
+
+                cumulative_net_proceeds_after_lamports,
+                cumulative_realized_pnl_after_lamports,
+
+                sell_simulator_version,
+                all_in_exit_price_raw,
+
+                pre_virtual_quote_reserves,
+                pre_virtual_token_reserves,
+                pre_real_quote_reserves,
+                pre_real_token_reserves,
+
+                post_virtual_quote_reserves,
+                post_virtual_token_reserves,
+                post_real_quote_reserves,
+                post_real_token_reserves,
+
+                created_at
+            )
+            VALUES (
+                :position_id,
+                :exit_sequence,
+
+                :portfolio_version,
+                :mint,
+
+                'PARTIAL',
+                :exit_reason,
+                :exit_timestamp,
+
+                :tokens_before,
+                :tokens_sold,
+                :tokens_after,
+
+                :remaining_exposure_before,
+                :allocated_exposure,
+                :remaining_exposure_after,
+
+                :remaining_basis_before,
+                :allocated_basis,
+                :remaining_basis_after,
+
+                :protocol_fee_bps,
+                :creator_fee_bps,
+
+                :protocol_fee,
+                :creator_fee,
+
+                :slippage_bps,
+
+                :base_network_fee,
+                :priority_fee,
+
+                :transaction_overhead,
+
+                :gross_quote,
+                :net_proceeds,
+
+                :leg_realized,
+
+                :cumulative_net_after,
+                :cumulative_realized_after,
+
+                :simulator_version,
+                :all_in_exit_price,
+
+                :pre_virtual_quote,
+                :pre_virtual_token,
+                :pre_real_quote,
+                :pre_real_token,
+
+                :post_virtual_quote,
+                :post_virtual_token,
+                :post_real_quote,
+                :post_real_token,
+
+                :created_at
+            )
+            """,
+            {
+                "position_id":
+                    position_id,
+
+                "exit_sequence":
+                    exit_sequence,
+
+                "portfolio_version":
+                    str(
+                        position[
+                            "portfolio_version"
+                        ]
+                    ),
+
+                "mint":
+                    mint,
+
+                "exit_reason":
+                    exit_reason.strip(),
+
+                "exit_timestamp":
+                    int(
+                        exit_timestamp
+                    ),
+
+                "tokens_before":
+                    tokens_before,
+
+                "tokens_sold":
+                    tokens_to_sell,
+
+                "tokens_after":
+                    tokens_after,
+
+                "remaining_exposure_before":
+                    remaining_exposure_before,
+
+                "allocated_exposure":
+                    allocated_exposure,
+
+                "remaining_exposure_after":
+                    remaining_exposure_after,
+
+                "remaining_basis_before":
+                    remaining_cost_basis_before,
+
+                "allocated_basis":
+                    allocated_cost_basis,
+
+                "remaining_basis_after":
+                    remaining_cost_basis_after,
+
+                "protocol_fee_bps":
+                    int(
+                        simulation.protocol_fee_bps
+                    ),
+
+                "creator_fee_bps":
+                    int(
+                        simulation.creator_fee_bps
+                    ),
+
+                "protocol_fee":
+                    int(
+                        simulation.protocol_fee
+                    ),
+
+                "creator_fee":
+                    int(
+                        simulation.creator_fee
+                    ),
+
+                "slippage_bps":
+                    int(
+                        simulation.slippage_bps
+                    ),
+
+                "base_network_fee":
+                    int(
+                        simulation
+                        .base_network_fee_lamports
+                    ),
+
+                "priority_fee":
+                    int(
+                        simulation
+                        .priority_fee_lamports
+                    ),
+
+                "transaction_overhead":
+                    int(
+                        simulation
+                        .total_transaction_overhead_lamports
+                    ),
+
+                "gross_quote":
+                    gross_quote,
+
+                "net_proceeds":
+                    net_proceeds,
+
+                "leg_realized":
+                    leg_realized_pnl,
+
+                "cumulative_net_after":
+                    cumulative_net_proceeds_after,
+
+                "cumulative_realized_after":
+                    cumulative_realized_pnl_after,
+
+                "simulator_version":
+                    simulation.simulator_version,
+
+                "all_in_exit_price":
+                    float(
+                        simulation.all_in_exit_price_raw
+                    ),
+
+                "pre_virtual_quote":
+                    int(
+                        simulation
+                        .pre_virtual_quote_reserves
+                    ),
+
+                "pre_virtual_token":
+                    int(
+                        simulation
+                        .pre_virtual_token_reserves
+                    ),
+
+                "pre_real_quote":
+                    int(
+                        simulation
+                        .pre_real_quote_reserves
+                    ),
+
+                "pre_real_token":
+                    int(
+                        simulation
+                        .pre_real_token_reserves
+                    ),
+
+                "post_virtual_quote":
+                    int(
+                        simulation
+                        .post_virtual_quote_reserves
+                    ),
+
+                "post_virtual_token":
+                    int(
+                        simulation
+                        .post_virtual_token_reserves
+                    ),
+
+                "post_real_quote":
+                    int(
+                        simulation
+                        .post_real_quote_reserves
+                    ),
+
+                "post_real_token":
+                    int(
+                        simulation
+                        .post_real_token_reserves
+                    ),
+
+                "created_at":
+                    now,
+            },
+        )
+
+        account_after = refresh_account(
+            connection
+        )
+
+        connection.commit()
+
+        return ShadowPartialCloseResult(
+            status="PARTIAL",
+            reasons=(),
+
+            position_id=position_id,
+            mint=mint,
+
+            exit_reason=(
+                exit_reason.strip()
+            ),
+
+            exit_sequence=(
+                exit_sequence
+            ),
+
+            tokens_before=(
+                tokens_before
+            ),
+
+            tokens_sold=(
+                tokens_to_sell
+            ),
+
+            tokens_after=(
+                tokens_after
+            ),
+
+            allocated_exposure_lamports=(
+                allocated_exposure
+            ),
+
+            allocated_cost_basis_lamports=(
+                allocated_cost_basis
+            ),
+
+            remaining_exposure_lamports=(
+                remaining_exposure_after
+            ),
+
+            remaining_cost_basis_lamports=(
+                remaining_cost_basis_after
+            ),
+
+            gross_quote_lamports=(
+                gross_quote
+            ),
+
+            net_proceeds_lamports=(
+                net_proceeds
+            ),
+
+            leg_realized_pnl_lamports=(
+                leg_realized_pnl
+            ),
+
+            cumulative_net_proceeds_lamports=(
+                cumulative_net_proceeds_after
+            ),
+
+            cumulative_realized_pnl_lamports=(
+                cumulative_realized_pnl_after
+            ),
+
+            sell_simulation=(
+                simulation
+            ),
+
+            residual_mark_simulation=(
+                residual_mark_simulation
             ),
 
             account_before=(
@@ -2289,6 +3903,18 @@ def write_off_shadow_position(
                 time.time()
             )
 
+        tokens_held = int(
+            position[
+                "tokens_held"
+            ]
+        )
+
+        remaining_exposure_before = int(
+            position[
+                "remaining_exposure_lamports"
+            ]
+        )
+
         remaining_cost_basis = int(
             position[
                 "remaining_cost_basis_lamports"
@@ -2318,6 +3944,30 @@ def write_off_shadow_position(
 
         now = int(
             time.time()
+        )
+
+        sequence_row = connection.execute(
+            """
+            SELECT
+                COALESCE(
+                    MAX(exit_sequence),
+                    0
+                ) + 1 AS next_sequence
+
+            FROM shadow_position_exits
+            WHERE position_id = ?
+            """,
+            (
+                int(
+                    position["id"]
+                ),
+            ),
+        ).fetchone()
+
+        exit_sequence = int(
+            sequence_row[
+                "next_sequence"
+            ]
         )
 
         updated = connection.execute(
@@ -2404,6 +4054,177 @@ def write_off_shadow_position(
 
                 account_after=None,
             )
+
+        connection.execute(
+            """
+            INSERT INTO shadow_position_exits (
+                position_id,
+                exit_sequence,
+
+                portfolio_version,
+                mint,
+
+                exit_kind,
+                exit_reason,
+                exit_timestamp,
+
+                tokens_before,
+                tokens_sold,
+                tokens_after,
+
+                remaining_exposure_before_lamports,
+                allocated_exposure_lamports,
+                remaining_exposure_after_lamports,
+
+                remaining_cost_basis_before_lamports,
+                allocated_cost_basis_lamports,
+                remaining_cost_basis_after_lamports,
+
+                protocol_fee_bps,
+                creator_fee_bps,
+
+                protocol_fee_lamports,
+                creator_fee_lamports,
+
+                slippage_bps,
+
+                base_network_fee_lamports,
+                priority_fee_lamports,
+
+                transaction_overhead_lamports,
+
+                gross_quote_lamports,
+                net_proceeds_lamports,
+
+                leg_realized_pnl_lamports,
+
+                cumulative_net_proceeds_after_lamports,
+                cumulative_realized_pnl_after_lamports,
+
+                sell_simulator_version,
+                all_in_exit_price_raw,
+
+                pre_virtual_quote_reserves,
+                pre_virtual_token_reserves,
+                pre_real_quote_reserves,
+                pre_real_token_reserves,
+
+                post_virtual_quote_reserves,
+                post_virtual_token_reserves,
+                post_real_quote_reserves,
+                post_real_token_reserves,
+
+                created_at
+            )
+            VALUES (
+                :position_id,
+                :exit_sequence,
+
+                :portfolio_version,
+                :mint,
+
+                'WRITE_OFF',
+                :exit_reason,
+                :exit_timestamp,
+
+                :tokens_before,
+                0,
+                :tokens_before,
+
+                :remaining_exposure_before,
+                :remaining_exposure_before,
+                0,
+
+                :remaining_basis_before,
+                :remaining_basis_before,
+                0,
+
+                NULL,
+                NULL,
+
+                NULL,
+                NULL,
+
+                NULL,
+
+                NULL,
+                NULL,
+
+                NULL,
+
+                0,
+                0,
+
+                :leg_realized,
+
+                :cumulative_net_after,
+                :cumulative_realized_after,
+
+                NULL,
+                NULL,
+
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+
+                :created_at
+            )
+            """,
+            {
+                "position_id":
+                    int(
+                        position["id"]
+                    ),
+
+                "exit_sequence":
+                    exit_sequence,
+
+                "portfolio_version":
+                    str(
+                        position[
+                            "portfolio_version"
+                        ]
+                    ),
+
+                "mint":
+                    mint,
+
+                "exit_reason":
+                    exit_reason.strip(),
+
+                "exit_timestamp":
+                    int(
+                        exit_timestamp
+                    ),
+
+                "tokens_before":
+                    tokens_held,
+
+                "remaining_exposure_before":
+                    remaining_exposure_before,
+
+                "remaining_basis_before":
+                    remaining_cost_basis,
+
+                "leg_realized":
+                    writeoff_realized_pnl,
+
+                "cumulative_net_after":
+                    cumulative_net_proceeds,
+
+                "cumulative_realized_after":
+                    cumulative_realized_pnl_after,
+
+                "created_at":
+                    now,
+            },
+        )
 
         #
         # No cash is credited.

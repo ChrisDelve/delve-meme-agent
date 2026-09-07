@@ -90,17 +90,14 @@ async def process_shadow_position_event(
     db_path: Path = DB_PATH,
 ) -> ShadowPositionEventResult:
 
-    _ensure_initialized(
-        db_path=db_path
-    )
-
-    assert _open_mints is not None
-
     #
     # Fast path. Nearly every Pump event
     # should stop here without touching SQLite.
     #
-    if mint not in _open_mints:
+    if not is_open_shadow_mint_tracked(
+        mint,
+        db_path=db_path,
+    ):
         return ShadowPositionEventResult(
             manager_version=(
                 SHADOW_POSITION_MANAGER_VERSION
@@ -125,7 +122,7 @@ async def process_shadow_position_event(
             time.time()
         )
 
-    lock = _get_mint_lock(
+    lock = get_shadow_position_lock(
         mint
     )
 
@@ -134,7 +131,10 @@ async def process_shadow_position_event(
         # Another queued event may already have
         # closed this position.
         #
-        if mint not in _open_mints:
+        if not is_open_shadow_mint_tracked(
+            mint,
+            db_path=db_path,
+        ):
             return ShadowPositionEventResult(
                 manager_version=(
                     SHADOW_POSITION_MANAGER_VERSION

@@ -241,6 +241,15 @@ def init_schema(
 
             tokens_held INTEGER NOT NULL,
 
+            remaining_cost_basis_lamports
+                INTEGER NOT NULL,
+
+            cumulative_net_proceeds_lamports
+                INTEGER NOT NULL,
+
+            cumulative_realized_pnl_lamports
+                INTEGER NOT NULL,
+
             entry_protocol_fee_bps
                 INTEGER NOT NULL,
 
@@ -302,6 +311,114 @@ def init_schema(
         )
         """
     )
+
+    #
+    # Backward-compatible residual-position
+    # accounting migration.
+    #
+    # Existing databases predate partial exits,
+    # so CREATE TABLE IF NOT EXISTS alone is not
+    # sufficient to add these columns.
+    #
+
+    position_columns = {
+        str(row["name"])
+        for row in connection.execute(
+            """
+            PRAGMA table_info(
+                shadow_positions
+            )
+            """
+        ).fetchall()
+    }
+
+    if (
+        "remaining_cost_basis_lamports"
+        not in position_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE shadow_positions
+            ADD COLUMN
+                remaining_cost_basis_lamports
+                INTEGER NOT NULL DEFAULT 0
+            """
+        )
+
+        #
+        # Existing OPEN positions still carry
+        # their entire original wallet cost.
+        #
+        # Existing CLOSED positions have no
+        # remaining basis.
+        #
+        connection.execute(
+            """
+            UPDATE shadow_positions
+            SET remaining_cost_basis_lamports =
+                CASE
+                    WHEN status = 'OPEN'
+                    THEN entry_wallet_cost_lamports
+                    ELSE 0
+                END
+            """
+        )
+
+    if (
+        "cumulative_net_proceeds_lamports"
+        not in position_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE shadow_positions
+            ADD COLUMN
+                cumulative_net_proceeds_lamports
+                INTEGER NOT NULL DEFAULT 0
+            """
+        )
+
+        #
+        # Backfill historical completed exits.
+        #
+        connection.execute(
+            """
+            UPDATE shadow_positions
+            SET cumulative_net_proceeds_lamports =
+                COALESCE(
+                    exit_net_proceeds_lamports,
+                    0
+                )
+            WHERE status = 'CLOSED'
+            """
+        )
+
+    if (
+        "cumulative_realized_pnl_lamports"
+        not in position_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE shadow_positions
+            ADD COLUMN
+                cumulative_realized_pnl_lamports
+                INTEGER NOT NULL DEFAULT 0
+            """
+        )
+
+        #
+        # Backfill historical completed exits.
+        #
+        connection.execute(
+            """
+            UPDATE shadow_positions
+            SET cumulative_realized_pnl_lamports =
+                COALESCE(
+                    realized_pnl_lamports,
+                    0
+                )
+            WHERE status = 'CLOSED'
+            """
+        )
 
     connection.execute(
         """
@@ -1187,6 +1304,9 @@ def open_shadow_position(
                 entry_spend_lamports,
                 entry_wallet_cost_lamports,
                 tokens_held,
+                remaining_cost_basis_lamports,
+                cumulative_net_proceeds_lamports,
+                cumulative_realized_pnl_lamports,
                 entry_protocol_fee_bps,
                 entry_creator_fee_bps,
                 entry_all_in_price_raw,
@@ -1204,13 +1324,14 @@ def open_shadow_position(
                 latest_mark_timestamp,
                 created_at,
                 updated_at
-            )
-            VALUES (
-                ?, ?, ?, 'OPEN', ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?
-            )
+                )
+                VALUES (
+                    ?, ?, ?, 'OPEN', ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?
+                )
             """,
             (
                 SHADOW_PORTFOLIO_VERSION,
@@ -1232,6 +1353,9 @@ def open_shadow_position(
                     simulation.tokens_out
                 ),
 
+                wallet_cost,
+                0,
+                0,
                 int(
                     protocol_fee_bps
                 ),

@@ -16,13 +16,19 @@ from src.execution.pump_execution_simulator import (
 from src.portfolio.shadow_portfolio import (
     DB_PATH,
     close_shadow_position,
+    get_shadow_exit_intent,
     list_open_shadow_mints,
     mark_open_position,
+    partial_close_shadow_position,
+    set_shadow_exit_intent,
     write_off_shadow_position,
 )
 from src.strategies.shadow_exit_engine import (
     ShadowExitDecision,
     evaluate_shadow_exit,
+)
+from src.strategies.shadow_exit_recovery import (
+    plan_shadow_exit_recovery,
 )
 
 from src.strategies.shadow_position_manager import (
@@ -36,7 +42,7 @@ from src.strategies.shadow_position_manager import (
 
 
 SHADOW_SWEEPER_VERSION = (
-    "shadow-position-sweeper-v1"
+    "shadow-position-sweeper-v2"
 )
 
 SHADOW_SWEEP_INTERVAL_SECONDS = 15
@@ -238,94 +244,10 @@ async def sweep_shadow_position(
             )
 
 
-        if (
-            mark.status == "UNEXITABLE"
-            and mark.sell_simulation is not None
-            and (
-                mark.sell_simulation.ineligible_reason
-                == "INSUFFICIENT_REAL_QUOTE_RESERVES"
-            )
+        if mark.status not in (
+            "MARKED",
+            "UNEXITABLE",
         ):
-                #
-                # This is intentionally a very narrow
-                # write-off condition.
-                #
-                # Even if every remaining lamport of
-                # real quote liquidity were recoverable,
-                # it would not cover transaction overhead.
-                #
-                # Therefore the currently supported Pump
-                # route has zero economic wallet recovery.
-                #
-                total_exit_overhead = (
-                    SHADOW_EXIT_BASE_NETWORK_FEE_LAMPORTS
-                    + SHADOW_EXIT_PRIORITY_FEE_LAMPORTS
-                )
-
-                if (
-                    int(
-                        curve_state.real_quote_reserves
-                    )
-                    <= int(
-                        total_exit_overhead
-                    )
-                ):
-                    write_off = (
-                        write_off_shadow_position(
-                            mint=mint,
-                            exit_reason=(
-                                "UNEXITABLE_ZERO_RECOVERY"
-                            ),
-                            exit_timestamp=int(
-                                evaluated_at
-                            ),
-                            db_path=db_path,
-                        )
-                    )
-
-                    if write_off.status in (
-                        "CLOSED",
-                        "NO_POSITION",
-                    ):
-                        unregister_open_shadow_mint(
-                            mint,
-                            db_path=db_path,
-                        )
-
-                    return ShadowSweepResult(
-                        sweeper_version=(
-                            SHADOW_SWEEPER_VERSION
-                        ),
-
-                        mint=mint,
-
-                        status=(
-                            write_off.status
-                        ),
-
-                        reason=(
-                            write_off.exit_reason
-                        ),
-
-                        protocol_fee_bps=int(
-                            fee_state.protocol_fee_bps
-                        ),
-
-                        creator_fee_bps=int(
-                            fee_state.creator_fee_bps
-                        ),
-
-                        mark_value_lamports=0,
-
-                        exit_decision=None,
-
-                        realized_pnl_lamports=(
-                            write_off
-                            .realized_pnl_lamports
-                        ),
-                    )
-
-        if mark.status != "MARKED":
             return ShadowSweepResult(
                 sweeper_version=(
                     SHADOW_SWEEPER_VERSION
@@ -357,11 +279,41 @@ async def sweep_shadow_position(
                 realized_pnl_lamports=None,
             )
 
-        if (
-            mark.entry_timestamp is None
-            or mark.entry_wallet_cost_lamports
-            is None
-        ):
+        intent = get_shadow_exit_intent(
+            mint=mint,
+            db_path=db_path,
+        )
+
+        if intent.status == "NO_POSITION":
+            unregister_open_shadow_mint(
+                mint,
+                db_path=db_path,
+            )
+
+            return ShadowSweepResult(
+                sweeper_version=(
+                    SHADOW_SWEEPER_VERSION
+                ),
+
+                mint=mint,
+
+                status="NO_POSITION",
+                reason=None,
+
+                protocol_fee_bps=int(
+                    fee_state.protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    fee_state.creator_fee_bps
+                ),
+
+                mark_value_lamports=None,
+                exit_decision=None,
+                realized_pnl_lamports=None,
+            )
+
+        if intent.status == "UNKNOWN":
             return ShadowSweepResult(
                 sweeper_version=(
                     SHADOW_SWEEPER_VERSION
@@ -372,7 +324,12 @@ async def sweep_shadow_position(
                 status="UNKNOWN",
 
                 reason=(
-                    "ENTRY_ECONOMICS_UNAVAILABLE"
+                    "EXIT_INTENT_FAILED:"
+                    + (
+                        intent.reasons[0]
+                        if intent.reasons
+                        else "UNKNOWN"
+                    )
                 ),
 
                 protocol_fee_bps=int(
@@ -388,72 +345,318 @@ async def sweep_shadow_position(
                 ),
 
                 exit_decision=None,
-
                 realized_pnl_lamports=None,
             )
 
-        decision = evaluate_shadow_exit(
-            entry_timestamp=int(
-                mark.entry_timestamp
-            ),
+        decision: (
+            ShadowExitDecision | None
+        ) = None
 
-            entry_wallet_cost_lamports=int(
-                mark.entry_wallet_cost_lamports
-            ),
+        if intent.status == "EXISTING":
+            if (
+                intent.exit_pending_reason is None
+                or intent.exit_pending_since is None
+            ):
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
 
-            cumulative_net_proceeds_lamports=int(
-                mark.cumulative_net_proceeds_lamports
-            ),
+                    mint=mint,
 
-            liquidation_value_lamports=int(
-                mark.mark_value_lamports
-            ),
+                    status="UNKNOWN",
+                    reason=(
+                        "EXIT_INTENT_STATE_INCOMPLETE"
+                    ),
 
-            mark_status=(
-                mark.status
-            ),
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
 
-            evaluated_at=int(
-                evaluated_at
-            ),
-        )
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
 
-        if not decision.should_exit:
-            return ShadowSweepResult(
-                sweeper_version=(
-                    SHADOW_SWEEPER_VERSION
+                    mark_value_lamports=int(
+                        mark.mark_value_lamports
+                    ),
+
+                    exit_decision=None,
+                    realized_pnl_lamports=None,
+                )
+
+            #
+            # A prior exit decision has already
+            # transitioned this position into
+            # liquidation mode.
+            #
+            # Never re-run HOLD / TP / SL policy
+            # for the residual position.
+            #
+            exit_reason = str(
+                intent.exit_pending_reason
+            )
+
+        elif intent.status == "NONE":
+            if (
+                mark.entry_timestamp is None
+                or (
+                    mark.entry_wallet_cost_lamports
+                    is None
+                )
+            ):
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="UNKNOWN",
+
+                    reason=(
+                        "ENTRY_ECONOMICS_UNAVAILABLE"
+                    ),
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=int(
+                        mark.mark_value_lamports
+                    ),
+
+                    exit_decision=None,
+                    realized_pnl_lamports=None,
+                )
+
+            decision = evaluate_shadow_exit(
+                entry_timestamp=int(
+                    mark.entry_timestamp
                 ),
 
-                mint=mint,
-
-                status=(
-                    decision.status
+                entry_wallet_cost_lamports=int(
+                    mark.entry_wallet_cost_lamports
                 ),
 
-                reason=(
-                    decision.reason
+                cumulative_net_proceeds_lamports=int(
+                    mark.cumulative_net_proceeds_lamports
                 ),
 
-                protocol_fee_bps=int(
-                    fee_state.protocol_fee_bps
-                ),
-
-                creator_fee_bps=int(
-                    fee_state.creator_fee_bps
-                ),
-
-                mark_value_lamports=int(
+                liquidation_value_lamports=int(
                     mark.mark_value_lamports
                 ),
 
-                exit_decision=(
-                    decision
+                mark_status=(
+                    mark.status
                 ),
 
-                realized_pnl_lamports=None,
+                evaluated_at=int(
+                    evaluated_at
+                ),
             )
 
-        if decision.reason is None:
+            if not decision.should_exit:
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status=(
+                        decision.status
+                    ),
+
+                    reason=(
+                        decision.reason
+                    ),
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=int(
+                        mark.mark_value_lamports
+                    ),
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=None,
+                )
+
+            if decision.reason is None:
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="UNKNOWN",
+
+                    reason=(
+                        "EXIT_REASON_UNAVAILABLE"
+                    ),
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=int(
+                        mark.mark_value_lamports
+                    ),
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=None,
+                )
+
+            persisted = set_shadow_exit_intent(
+                mint=mint,
+
+                exit_reason=(
+                    decision.reason
+                ),
+
+                exit_timestamp=int(
+                    evaluated_at
+                ),
+
+                db_path=db_path,
+            )
+
+            if persisted.status == "NO_POSITION":
+                unregister_open_shadow_mint(
+                    mint,
+                    db_path=db_path,
+                )
+
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="NO_POSITION",
+                    reason=None,
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=None,
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=None,
+                )
+
+            if persisted.status not in (
+                "SET",
+                "EXISTING",
+            ):
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="UNKNOWN",
+
+                    reason=(
+                        "EXIT_INTENT_PERSIST_FAILED:"
+                        f"{persisted.status}"
+                    ),
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=int(
+                        mark.mark_value_lamports
+                    ),
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=None,
+                )
+
+            if (
+                persisted.exit_pending_reason
+                is None
+            ):
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="UNKNOWN",
+
+                    reason=(
+                        "PERSISTED_EXIT_REASON_UNAVAILABLE"
+                    ),
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=int(
+                        mark.mark_value_lamports
+                    ),
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=None,
+                )
+
+            #
+            # First persisted intent wins even if
+            # another writer had already stored it.
+            #
+            exit_reason = str(
+                persisted.exit_pending_reason
+            )
+
+        else:
             return ShadowSweepResult(
                 sweeper_version=(
                     SHADOW_SWEEPER_VERSION
@@ -463,7 +666,37 @@ async def sweep_shadow_position(
 
                 status="UNKNOWN",
 
-                reason="EXIT_REASON_UNAVAILABLE",
+                reason=(
+                    "UNEXPECTED_EXIT_INTENT_STATUS:"
+                    f"{intent.status}"
+                ),
+
+                protocol_fee_bps=int(
+                    fee_state.protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    fee_state.creator_fee_bps
+                ),
+
+                mark_value_lamports=int(
+                    mark.mark_value_lamports
+                ),
+
+                exit_decision=None,
+                realized_pnl_lamports=None,
+            )
+
+        if int(mark.tokens_held) <= 0:
+            return ShadowSweepResult(
+                sweeper_version=(
+                    SHADOW_SWEEPER_VERSION
+                ),
+
+                mint=mint,
+
+                status="UNKNOWN",
+                reason="OPEN_POSITION_HAS_NO_TOKENS",
 
                 protocol_fee_bps=int(
                     fee_state.protocol_fee_bps
@@ -484,48 +717,38 @@ async def sweep_shadow_position(
                 realized_pnl_lamports=None,
             )
 
-        close = close_shadow_position(
-            mint=mint,
+        try:
+            recovery = (
+                plan_shadow_exit_recovery(
+                    tokens_held=int(
+                        mark.tokens_held
+                    ),
 
-            exit_reason=(
-                decision.reason
-            ),
+                    curve_state=curve_state,
 
-            curve_state=curve_state,
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
 
-            protocol_fee_bps=int(
-                fee_state.protocol_fee_bps
-            ),
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
 
-            creator_fee_bps=int(
-                fee_state.creator_fee_bps
-            ),
+                    slippage_bps=(
+                        SHADOW_EXIT_SLIPPAGE_BPS
+                    ),
 
-            slippage_bps=(
-                SHADOW_EXIT_SLIPPAGE_BPS
-            ),
+                    base_network_fee_lamports=(
+                        SHADOW_EXIT_BASE_NETWORK_FEE_LAMPORTS
+                    ),
 
-            base_network_fee_lamports=(
-                SHADOW_EXIT_BASE_NETWORK_FEE_LAMPORTS
-            ),
-
-            priority_fee_lamports=(
-                SHADOW_EXIT_PRIORITY_FEE_LAMPORTS
-            ),
-
-            exit_timestamp=int(
-                evaluated_at
-            ),
-
-            db_path=db_path,
-        )
-
-        if close.status == "CLOSED":
-            unregister_open_shadow_mint(
-                mint,
-                db_path=db_path,
+                    priority_fee_lamports=(
+                        SHADOW_EXIT_PRIORITY_FEE_LAMPORTS
+                    ),
+                )
             )
 
+        except Exception as error:
             return ShadowSweepResult(
                 sweeper_version=(
                     SHADOW_SWEEPER_VERSION
@@ -533,10 +756,11 @@ async def sweep_shadow_position(
 
                 mint=mint,
 
-                status="CLOSED",
+                status="UNKNOWN",
 
                 reason=(
-                    decision.reason
+                    "EXIT_RECOVERY_PLAN_FAILED:"
+                    f"{type(error).__name__}"
                 ),
 
                 protocol_fee_bps=int(
@@ -555,15 +779,420 @@ async def sweep_shadow_position(
                     decision
                 ),
 
-                realized_pnl_lamports=int(
-                    close.realized_pnl_lamports
-                ),
+                realized_pnl_lamports=None,
             )
 
-        if close.status == "NO_POSITION":
-            unregister_open_shadow_mint(
-                mint,
+        if recovery.action == "FINAL":
+            close = close_shadow_position(
+                mint=mint,
+                exit_reason=exit_reason,
+
+                curve_state=curve_state,
+
+                protocol_fee_bps=int(
+                    fee_state.protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    fee_state.creator_fee_bps
+                ),
+
+                slippage_bps=(
+                    SHADOW_EXIT_SLIPPAGE_BPS
+                ),
+
+                base_network_fee_lamports=(
+                    SHADOW_EXIT_BASE_NETWORK_FEE_LAMPORTS
+                ),
+
+                priority_fee_lamports=(
+                    SHADOW_EXIT_PRIORITY_FEE_LAMPORTS
+                ),
+
+                exit_timestamp=int(
+                    evaluated_at
+                ),
+
                 db_path=db_path,
+            )
+
+            if close.status == "CLOSED":
+                unregister_open_shadow_mint(
+                    mint,
+                    db_path=db_path,
+                )
+
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="CLOSED",
+                    reason=exit_reason,
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=int(
+                        mark.mark_value_lamports
+                    ),
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=int(
+                        close.realized_pnl_lamports
+                    ),
+                )
+
+            if close.status == "NO_POSITION":
+                unregister_open_shadow_mint(
+                    mint,
+                    db_path=db_path,
+                )
+
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="NO_POSITION",
+                    reason=None,
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=None,
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=None,
+                )
+
+            return ShadowSweepResult(
+                sweeper_version=(
+                    SHADOW_SWEEPER_VERSION
+                ),
+
+                mint=mint,
+
+                status="UNKNOWN",
+
+                reason=(
+                    "POSITION_CLOSE_FAILED:"
+                    f"{close.status}"
+                ),
+
+                protocol_fee_bps=int(
+                    fee_state.protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    fee_state.creator_fee_bps
+                ),
+
+                mark_value_lamports=int(
+                    mark.mark_value_lamports
+                ),
+
+                exit_decision=(
+                    decision
+                ),
+
+                realized_pnl_lamports=None,
+            )
+
+        if recovery.action == "PARTIAL":
+            partial = partial_close_shadow_position(
+                mint=mint,
+                exit_reason=exit_reason,
+
+                tokens_to_sell=int(
+                    recovery.tokens_to_sell
+                ),
+
+                curve_state=curve_state,
+
+                protocol_fee_bps=int(
+                    fee_state.protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    fee_state.creator_fee_bps
+                ),
+
+                slippage_bps=(
+                    SHADOW_EXIT_SLIPPAGE_BPS
+                ),
+
+                base_network_fee_lamports=(
+                    SHADOW_EXIT_BASE_NETWORK_FEE_LAMPORTS
+                ),
+
+                priority_fee_lamports=(
+                    SHADOW_EXIT_PRIORITY_FEE_LAMPORTS
+                ),
+
+                exit_timestamp=int(
+                    evaluated_at
+                ),
+
+                db_path=db_path,
+            )
+
+            if partial.status == "PARTIAL":
+                residual_mark = 0
+
+                if (
+                    partial.residual_mark_simulation
+                    is not None
+                    and (
+                        partial
+                        .residual_mark_simulation
+                        .executable
+                    )
+                ):
+                    residual_mark = int(
+                        partial
+                        .residual_mark_simulation
+                        .net_wallet_proceeds_lamports
+                    )
+
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="PARTIAL",
+                    reason=exit_reason,
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=(
+                        residual_mark
+                    ),
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=int(
+                        partial
+                        .cumulative_realized_pnl_lamports
+                    ),
+                )
+
+            if partial.status == "NO_POSITION":
+                unregister_open_shadow_mint(
+                    mint,
+                    db_path=db_path,
+                )
+
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="NO_POSITION",
+                    reason=None,
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=None,
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=None,
+                )
+
+            return ShadowSweepResult(
+                sweeper_version=(
+                    SHADOW_SWEEPER_VERSION
+                ),
+
+                mint=mint,
+
+                status="UNKNOWN",
+
+                reason=(
+                    "PARTIAL_EXIT_FAILED:"
+                    f"{partial.status}"
+                ),
+
+                protocol_fee_bps=int(
+                    fee_state.protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    fee_state.creator_fee_bps
+                ),
+
+                mark_value_lamports=int(
+                    mark.mark_value_lamports
+                ),
+
+                exit_decision=(
+                    decision
+                ),
+
+                realized_pnl_lamports=None,
+            )
+
+        if (
+            recovery.action
+            == "WRITE_OFF_CANDIDATE"
+        ):
+            write_off = (
+                write_off_shadow_position(
+                    mint=mint,
+
+                    #
+                    # Preserve the original policy
+                    # reason. exit_kind=WRITE_OFF
+                    # records the terminal mechanic.
+                    #
+                    exit_reason=exit_reason,
+
+                    exit_timestamp=int(
+                        evaluated_at
+                    ),
+
+                    db_path=db_path,
+                )
+            )
+
+            if write_off.status in (
+                "CLOSED",
+                "NO_POSITION",
+            ):
+                unregister_open_shadow_mint(
+                    mint,
+                    db_path=db_path,
+                )
+
+            if write_off.status == "CLOSED":
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="CLOSED",
+                    reason=exit_reason,
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=0,
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=int(
+                        write_off
+                        .realized_pnl_lamports
+                    ),
+                )
+
+            if write_off.status == "NO_POSITION":
+                return ShadowSweepResult(
+                    sweeper_version=(
+                        SHADOW_SWEEPER_VERSION
+                    ),
+
+                    mint=mint,
+
+                    status="NO_POSITION",
+                    reason=None,
+
+                    protocol_fee_bps=int(
+                        fee_state.protocol_fee_bps
+                    ),
+
+                    creator_fee_bps=int(
+                        fee_state.creator_fee_bps
+                    ),
+
+                    mark_value_lamports=None,
+
+                    exit_decision=(
+                        decision
+                    ),
+
+                    realized_pnl_lamports=None,
+                )
+
+            return ShadowSweepResult(
+                sweeper_version=(
+                    SHADOW_SWEEPER_VERSION
+                ),
+
+                mint=mint,
+
+                status="UNKNOWN",
+
+                reason=(
+                    "POSITION_WRITE_OFF_FAILED:"
+                    f"{write_off.status}"
+                ),
+
+                protocol_fee_bps=int(
+                    fee_state.protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    fee_state.creator_fee_bps
+                ),
+
+                mark_value_lamports=0,
+
+                exit_decision=(
+                    decision
+                ),
+
+                realized_pnl_lamports=None,
             )
 
         return ShadowSweepResult(
@@ -576,8 +1205,8 @@ async def sweep_shadow_position(
             status="UNKNOWN",
 
             reason=(
-                "POSITION_CLOSE_FAILED:"
-                f"{close.status}"
+                "EXIT_RECOVERY_UNAVAILABLE:"
+                f"{recovery.reason}"
             ),
 
             protocol_fee_bps=int(

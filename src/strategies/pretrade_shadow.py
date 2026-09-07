@@ -1617,13 +1617,14 @@ def schedule_pretrade_shadow_candidate(
     loop = asyncio.get_running_loop()
 
     task = loop.create_task(
-        run_candidate(
-            entry_signature=(
-                entry_signature
-            ),
-            mint=mint,
-            slot=slot,
-            trade_timestamp=int(
+    run_candidate(
+        entry_signature=(
+            entry_signature
+        ),
+        mint=mint,
+        event_user=event_user,
+        slot=slot,
+        trade_timestamp=int(
                 trade_timestamp
             ),
             predicted_at=int(

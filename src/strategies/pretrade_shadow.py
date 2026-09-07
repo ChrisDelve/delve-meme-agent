@@ -746,6 +746,8 @@ async def run_candidate(
             event_creator_fee_bps=(
                 event_creator_fee_bps
             ),
+
+            event_user=event_user,
         )
 
         if (

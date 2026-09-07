@@ -304,11 +304,56 @@ def evaluate_shadow_exit(
     )
 
     #
-    # Exit policy requires an executable
-    # liquidation mark. Never fabricate an
-    # exit decision from an unexitable mark.
+    # Price-based TP / SL decisions require an
+    # executable liquidation mark.
+    #
+    # MAX_HOLD_TIME is different: it is a
+    # time-based mandate and remains objectively
+    # due even when the current liquidation mark
+    # is unavailable.
     #
     if mark_status != "MARKED":
+        if (
+            age_seconds
+            >= policy.max_hold_seconds
+        ):
+            return ShadowExitDecision(
+                engine_version=(
+                    EXIT_ENGINE_VERSION
+                ),
+
+                status=EXIT,
+                reason="MAX_HOLD_TIME",
+
+                entry_timestamp=int(
+                    entry_timestamp
+                ),
+
+                evaluated_at=int(
+                    evaluated_at
+                ),
+
+                age_seconds=(
+                    age_seconds
+                ),
+
+                entry_wallet_cost_lamports=int(
+                    entry_wallet_cost_lamports
+                ),
+
+                cumulative_net_proceeds_lamports=int(
+                    cumulative_net_proceeds_lamports
+                ),
+
+                liquidation_value_lamports=int(
+                    liquidation_value_lamports
+                ),
+
+                return_bps=None,
+
+                policy=policy,
+            )
+
         return ShadowExitDecision(
             engine_version=(
                 EXIT_ENGINE_VERSION

@@ -1775,15 +1775,37 @@ def close_shadow_position(
                 time.time()
             )
 
-        wallet_cost = int(
+        remaining_cost_basis = int(
             position[
-                "entry_wallet_cost_lamports"
+                "remaining_cost_basis_lamports"
             ]
         )
 
-        realized_pnl = (
+        cumulative_net_proceeds_before = int(
+            position[
+                "cumulative_net_proceeds_lamports"
+            ]
+        )
+
+        cumulative_realized_pnl_before = int(
+            position[
+                "cumulative_realized_pnl_lamports"
+            ]
+        )
+
+        leg_realized_pnl = (
             net_proceeds
-            - wallet_cost
+            - remaining_cost_basis
+        )
+
+        cumulative_net_proceeds_after = (
+            cumulative_net_proceeds_before
+            + net_proceeds
+        )
+
+        cumulative_realized_pnl_after = (
+            cumulative_realized_pnl_before
+            + leg_realized_pnl
         )
 
         now = int(
@@ -1796,6 +1818,13 @@ def close_shadow_position(
 
             SET
                 status = 'CLOSED',
+
+                tokens_held = 0,
+                remaining_exposure_lamports = 0,
+                remaining_cost_basis_lamports = 0,
+
+                cumulative_net_proceeds_lamports = ?,
+                cumulative_realized_pnl_lamports = ?,
 
                 latest_mark_value_lamports = ?,
                 unrealized_pnl_lamports = 0,
@@ -1824,6 +1853,9 @@ def close_shadow_position(
               AND status = 'OPEN'
             """,
             (
+                cumulative_net_proceeds_after,
+                cumulative_realized_pnl_after,
+
                 net_proceeds,
 
                 int(
@@ -1864,7 +1896,7 @@ def close_shadow_position(
 
                 net_proceeds,
 
-                realized_pnl,
+                cumulative_realized_pnl_after,
 
                 now,
 
@@ -2014,7 +2046,7 @@ def close_shadow_position(
             ),
 
             realized_pnl_lamports=(
-                realized_pnl
+                cumulative_realized_pnl_after
             ),
 
             sell_simulation=(
@@ -2114,14 +2146,31 @@ def write_off_shadow_position(
                 time.time()
             )
 
-        wallet_cost = int(
+        remaining_cost_basis = int(
             position[
-                "entry_wallet_cost_lamports"
+                "remaining_cost_basis_lamports"
             ]
         )
 
-        realized_pnl = (
-            -wallet_cost
+        cumulative_net_proceeds = int(
+            position[
+                "cumulative_net_proceeds_lamports"
+            ]
+        )
+
+        cumulative_realized_pnl_before = int(
+            position[
+                "cumulative_realized_pnl_lamports"
+            ]
+        )
+
+        writeoff_realized_pnl = (
+            -remaining_cost_basis
+        )
+
+        cumulative_realized_pnl_after = (
+            cumulative_realized_pnl_before
+            + writeoff_realized_pnl
         )
 
         now = int(
@@ -2131,8 +2180,15 @@ def write_off_shadow_position(
         updated = connection.execute(
             """
             UPDATE shadow_positions
+
             SET
                 status = 'CLOSED',
+
+                remaining_exposure_lamports = 0,
+                remaining_cost_basis_lamports = 0,
+
+                cumulative_net_proceeds_lamports = ?,
+                cumulative_realized_pnl_lamports = ?,
 
                 latest_mark_value_lamports = 0,
                 unrealized_pnl_lamports = 0,
@@ -2154,12 +2210,19 @@ def write_off_shadow_position(
               AND status = 'OPEN'
             """,
             (
+                cumulative_net_proceeds,
+                cumulative_realized_pnl_after,
+
                 int(
                     exit_timestamp
                 ),
-                exit_reason,
-                realized_pnl,
+
+                exit_reason.strip(),
+
+                cumulative_realized_pnl_after,
+
                 now,
+
                 int(
                     position["id"]
                 ),
@@ -2236,7 +2299,7 @@ def write_off_shadow_position(
             net_proceeds_lamports=0,
 
             realized_pnl_lamports=(
-                realized_pnl
+                cumulative_realized_pnl_after
             ),
 
             sell_simulation=None,

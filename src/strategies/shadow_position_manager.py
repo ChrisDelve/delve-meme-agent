@@ -1,46 +1,46 @@
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.execution.live_fee_resolver import (
-    resolve_live_event_fee_bps,
-)
-
-from src.execution.pump_execution_simulator import (
-    PumpCurveState,
-)
-
 from src.portfolio.shadow_portfolio import (
     DB_PATH,
-    ShadowCloseResult,
-    ShadowMarkResult,
-    close_shadow_position,
-    mark_open_position,
 )
-
-from src.strategies.shadow_exit_engine import (
-    ShadowExitDecision,
-    evaluate_shadow_exit,
-)
-
 from src.strategies.shadow_position_runtime import (
-    SHADOW_EXIT_BASE_NETWORK_FEE_LAMPORTS,
-    SHADOW_EXIT_PRIORITY_FEE_LAMPORTS,
-    SHADOW_EXIT_SLIPPAGE_BPS,
-    get_shadow_position_lock,
     initialize_shadow_position_manager,
     is_open_shadow_mint_tracked,
     register_open_shadow_mint,
-    unregister_open_shadow_mint,
+)
+from src.strategies.shadow_position_sweeper import (
+    ShadowSweepResult,
+    sweep_shadow_position,
 )
 
 
 SHADOW_POSITION_MANAGER_VERSION = (
-    "shadow-position-manager-v1"
+    "shadow-position-manager-v2"
 )
+
+#
+# Event activity is only a trigger for the
+# authoritative position-management path.
+#
+# Event-provided reserves and fee fields must
+# never price our hypothetical liquidation.
+#
+# At most one event-driven evaluation is active
+# per mint. Additional events mark the mint dirty
+# and return immediately.
+#
+# The active evaluator may perform one trailing
+# authoritative evaluation after its first pass.
+#
+# This bounds a single event burst to two sweeps:
+# initial + one trailing dirty pass.
+#
+_event_evaluations_in_flight: set[str] = set()
+_event_dirty_mints: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -52,18 +52,75 @@ class ShadowPositionEventResult:
 
     mint: str
 
-    fee_status: str | None
-    protocol_fee_bps: int | None
-    creator_fee_bps: int | None
-
-    mark: ShadowMarkResult | None
-
-    exit_decision: (
-        ShadowExitDecision | None
+    sweep_result: (
+        ShadowSweepResult | None
     )
 
-    close: ShadowCloseResult | None
+    trailing_evaluation: bool
 
+
+def _ignored_event_result(
+    *,
+    mint: str,
+    reason: str,
+) -> ShadowPositionEventResult:
+    return ShadowPositionEventResult(
+        manager_version=(
+            SHADOW_POSITION_MANAGER_VERSION
+        ),
+
+        status="IGNORED",
+        reason=reason,
+
+        mint=mint,
+
+        sweep_result=None,
+        trailing_evaluation=False,
+    )
+
+
+def _coalesced_event_result(
+    *,
+    mint: str,
+) -> ShadowPositionEventResult:
+    return ShadowPositionEventResult(
+        manager_version=(
+            SHADOW_POSITION_MANAGER_VERSION
+        ),
+
+        status="COALESCED",
+        reason=(
+            "EVENT_EVALUATION_ALREADY_RUNNING"
+        ),
+
+        mint=mint,
+
+        sweep_result=None,
+        trailing_evaluation=False,
+    )
+
+
+def _event_result_from_sweep(
+    *,
+    result: ShadowSweepResult,
+    trailing_evaluation: bool,
+) -> ShadowPositionEventResult:
+    return ShadowPositionEventResult(
+        manager_version=(
+            SHADOW_POSITION_MANAGER_VERSION
+        ),
+
+        status=result.status,
+        reason=result.reason,
+
+        mint=result.mint,
+
+        sweep_result=result,
+
+        trailing_evaluation=(
+            trailing_evaluation
+        ),
+    )
 
 
 async def process_shadow_position_event(
@@ -89,495 +146,136 @@ async def process_shadow_position_event(
 
     db_path: Path = DB_PATH,
 ) -> ShadowPositionEventResult:
+    #
+    # Preserve the collector-facing event contract,
+    # but deliberately do not use event economics
+    # as execution authority.
+    #
+    _ = (
+        event_user,
+        quote_amount,
+        protocol_fee_lamports,
+        creator_fee_lamports,
+        event_protocol_fee_bps,
+        event_creator_fee_bps,
+        virtual_quote_reserves,
+        virtual_token_reserves,
+        real_quote_reserves,
+        real_token_reserves,
+    )
 
-    #
-    # Fast path. Nearly every Pump event
-    # should stop here without touching SQLite.
-    #
     if not is_open_shadow_mint_tracked(
         mint,
         db_path=db_path,
     ):
-        return ShadowPositionEventResult(
-            manager_version=(
-                SHADOW_POSITION_MANAGER_VERSION
-            ),
-
-            status="IGNORED",
-            reason="NO_TRACKED_POSITION",
-
+        return _ignored_event_result(
             mint=mint,
-
-            fee_status=None,
-            protocol_fee_bps=None,
-            creator_fee_bps=None,
-
-            mark=None,
-            exit_decision=None,
-            close=None,
+            reason="NO_TRACKED_POSITION",
         )
+
+    #
+    # No await occurs between checking and adding
+    # this flag. Within the collector event loop,
+    # this is the coalescing ownership boundary.
+    #
+    if mint in _event_evaluations_in_flight:
+        _event_dirty_mints.add(
+            mint
+        )
+
+        return _coalesced_event_result(
+            mint=mint
+        )
+
+    _event_evaluations_in_flight.add(
+        mint
+    )
+
+    #
+    # A stale dirty marker must never force an
+    # unnecessary trailing evaluation for a new
+    # burst.
+    #
+    _event_dirty_mints.discard(
+        mint
+    )
 
     if observed_at is None:
         observed_at = int(
             time.time()
         )
 
-    lock = get_shadow_position_lock(
-        mint
-    )
+    trailing_evaluation = False
 
-    async with lock:
+    try:
         #
-        # Another queued event may already have
-        # closed this position.
+        # sweep_shadow_position owns the shared
+        # per-mint position lock. The manager must
+        # not acquire that lock itself.
         #
-        if not is_open_shadow_mint_tracked(
-            mint,
-            db_path=db_path,
-        ):
-            return ShadowPositionEventResult(
-                manager_version=(
-                    SHADOW_POSITION_MANAGER_VERSION
-                ),
-
-                status="IGNORED",
-                reason="POSITION_ALREADY_CLOSED",
-
-                mint=mint,
-
-                fee_status=None,
-                protocol_fee_bps=None,
-                creator_fee_bps=None,
-
-                mark=None,
-                exit_decision=None,
-                close=None,
-            )
-
-        (
-            fee_status,
-            protocol_fee_bps,
-            creator_fee_bps,
-        ) = resolve_live_event_fee_bps(
-            quote_amount=int(
-                quote_amount
-            ),
-
-            protocol_fee_lamports=(
-                protocol_fee_lamports
-            ),
-
-            creator_fee_lamports=(
-                creator_fee_lamports
-            ),
-
-            event_protocol_fee_bps=(
-                event_protocol_fee_bps
-            ),
-
-            event_creator_fee_bps=(
-                event_creator_fee_bps
-            ),
-
-            event_user=(
-                event_user
-            ),
-        )
-
-        #
-        # Fail closed. This includes the
-        # privileged Mayhem-agent fee regime,
-        # which is not applicable to our wallet.
-        #
-        if (
-            protocol_fee_bps is None
-            or creator_fee_bps is None
-        ):
-            return ShadowPositionEventResult(
-                manager_version=(
-                    SHADOW_POSITION_MANAGER_VERSION
-                ),
-
-                status="SKIPPED",
-                reason=(
-                    "UNUSABLE_FEE_REGIME:"
-                    f"{fee_status}"
-                ),
-
-                mint=mint,
-
-                fee_status=(
-                    fee_status
-                ),
-
-                protocol_fee_bps=None,
-                creator_fee_bps=None,
-
-                mark=None,
-                exit_decision=None,
-                close=None,
-            )
-
-        curve_state = PumpCurveState(
-            virtual_quote_reserves=int(
-                virtual_quote_reserves
-            ),
-
-            virtual_token_reserves=int(
-                virtual_token_reserves
-            ),
-
-            real_quote_reserves=int(
-                real_quote_reserves
-            ),
-
-            real_token_reserves=int(
-                real_token_reserves
-            ),
-        )
-
-        mark = mark_open_position(
+        result = await sweep_shadow_position(
             mint=mint,
-
-            curve_state=(
-                curve_state
-            ),
-
-            protocol_fee_bps=int(
-                protocol_fee_bps
-            ),
-
-            creator_fee_bps=int(
-                creator_fee_bps
-            ),
-
-            slippage_bps=(
-                SHADOW_EXIT_SLIPPAGE_BPS
-            ),
-
-            base_network_fee_lamports=(
-                SHADOW_EXIT_BASE_NETWORK_FEE_LAMPORTS
-            ),
-
-            priority_fee_lamports=(
-                SHADOW_EXIT_PRIORITY_FEE_LAMPORTS
-            ),
-
-            mark_timestamp=int(
-                observed_at
-            ),
-
             db_path=db_path,
-        )
-
-        if mark.status == "NO_POSITION":
-            unregister_open_shadow_mint(
-                mint,
-                db_path=db_path,
-            )
-
-            return ShadowPositionEventResult(
-                manager_version=(
-                    SHADOW_POSITION_MANAGER_VERSION
-                ),
-
-                status="NO_POSITION",
-                reason=None,
-
-                mint=mint,
-
-                fee_status=(
-                    fee_status
-                ),
-
-                protocol_fee_bps=int(
-                    protocol_fee_bps
-                ),
-
-                creator_fee_bps=int(
-                    creator_fee_bps
-                ),
-
-                mark=mark,
-                exit_decision=None,
-                close=None,
-            )
-
-        if mark.status != "MARKED":
-            return ShadowPositionEventResult(
-                manager_version=(
-                    SHADOW_POSITION_MANAGER_VERSION
-                ),
-
-                status="UNKNOWN",
-                reason=(
-                    "LIQUIDATION_MARK_FAILED:"
-                    f"{mark.status}"
-                ),
-
-                mint=mint,
-
-                fee_status=(
-                    fee_status
-                ),
-
-                protocol_fee_bps=int(
-                    protocol_fee_bps
-                ),
-
-                creator_fee_bps=int(
-                    creator_fee_bps
-                ),
-
-                mark=mark,
-                exit_decision=None,
-                close=None,
-            )
-
-        if (
-            mark.entry_timestamp is None
-            or mark.entry_wallet_cost_lamports
-            is None
-        ):
-            return ShadowPositionEventResult(
-                manager_version=(
-                    SHADOW_POSITION_MANAGER_VERSION
-                ),
-
-                status="UNKNOWN",
-                reason=(
-                    "ENTRY_ECONOMICS_UNAVAILABLE"
-                ),
-
-                mint=mint,
-
-                fee_status=(
-                    fee_status
-                ),
-
-                protocol_fee_bps=int(
-                    protocol_fee_bps
-                ),
-
-                creator_fee_bps=int(
-                    creator_fee_bps
-                ),
-
-                mark=mark,
-                exit_decision=None,
-                close=None,
-            )
-
-        decision = evaluate_shadow_exit(
-            entry_timestamp=int(
-                mark.entry_timestamp
-            ),
-
-            entry_wallet_cost_lamports=int(
-                mark.entry_wallet_cost_lamports
-            ),
-
-            cumulative_net_proceeds_lamports=int(
-                mark.cumulative_net_proceeds_lamports
-            ),
-
-            liquidation_value_lamports=int(
-                mark.mark_value_lamports
-            ),
-
-            mark_status=(
-                mark.status
-            ),
-
             evaluated_at=int(
                 observed_at
             ),
         )
 
-        if not decision.should_exit:
-            return ShadowPositionEventResult(
-                manager_version=(
-                    SHADOW_POSITION_MANAGER_VERSION
-                ),
-
-                status=(
-                    decision.status
-                ),
-
-                reason=(
-                    decision.reason
-                ),
-
-                mint=mint,
-
-                fee_status=(
-                    fee_status
-                ),
-
-                protocol_fee_bps=int(
-                    protocol_fee_bps
-                ),
-
-                creator_fee_bps=int(
-                    creator_fee_bps
-                ),
-
-                mark=mark,
-
-                exit_decision=(
-                    decision
-                ),
-
-                close=None,
+        #
+        # If market activity arrived while the
+        # first authoritative evaluation was in
+        # progress, perform exactly one trailing
+        # pass if the position remains tracked.
+        #
+        if (
+            mint in _event_dirty_mints
+            and result.status
+            not in (
+                "CLOSED",
+                "NO_POSITION",
+            )
+            and is_open_shadow_mint_tracked(
+                mint,
+                db_path=db_path,
+            )
+        ):
+            _event_dirty_mints.discard(
+                mint
             )
 
-        if decision.reason is None:
-            return ShadowPositionEventResult(
-                manager_version=(
-                    SHADOW_POSITION_MANAGER_VERSION
-                ),
+            trailing_evaluation = True
 
-                status="UNKNOWN",
-                reason=(
-                    "EXIT_REASON_UNAVAILABLE"
-                ),
-
+            result = await sweep_shadow_position(
                 mint=mint,
-
-                fee_status=(
-                    fee_status
+                db_path=db_path,
+                evaluated_at=int(
+                    time.time()
                 ),
-
-                protocol_fee_bps=int(
-                    protocol_fee_bps
-                ),
-
-                creator_fee_bps=int(
-                    creator_fee_bps
-                ),
-
-                mark=mark,
-
-                exit_decision=(
-                    decision
-                ),
-
-                close=None,
             )
 
-        close = close_shadow_position(
-            mint=mint,
-
-            exit_reason=(
-                decision.reason
+        return _event_result_from_sweep(
+            result=result,
+            trailing_evaluation=(
+                trailing_evaluation
             ),
-
-            curve_state=(
-                curve_state
-            ),
-
-            protocol_fee_bps=int(
-                protocol_fee_bps
-            ),
-
-            creator_fee_bps=int(
-                creator_fee_bps
-            ),
-
-            slippage_bps=(
-                SHADOW_EXIT_SLIPPAGE_BPS
-            ),
-
-            base_network_fee_lamports=(
-                SHADOW_EXIT_BASE_NETWORK_FEE_LAMPORTS
-            ),
-
-            priority_fee_lamports=(
-                SHADOW_EXIT_PRIORITY_FEE_LAMPORTS
-            ),
-
-            exit_timestamp=int(
-                observed_at
-            ),
-
-            db_path=db_path,
         )
 
-        if close.status == "CLOSED":
-            unregister_open_shadow_mint(
-                mint,
-                db_path=db_path,
-            )
+    finally:
+        #
+        # Events arriving during the trailing pass
+        # may mark the mint dirty again. We
+        # intentionally clear that marker here:
+        # this invocation is capped at two
+        # authoritative evaluations.
+        #
+        # A later event can start a fresh burst,
+        # and the 15-second periodic sweeper
+        # remains the independent fallback.
+        #
+        _event_evaluations_in_flight.discard(
+            mint
+        )
 
-            return ShadowPositionEventResult(
-                manager_version=(
-                    SHADOW_POSITION_MANAGER_VERSION
-                ),
-
-                status="CLOSED",
-                reason=(
-                    decision.reason
-                ),
-
-                mint=mint,
-
-                fee_status=(
-                    fee_status
-                ),
-
-                protocol_fee_bps=int(
-                    protocol_fee_bps
-                ),
-
-                creator_fee_bps=int(
-                    creator_fee_bps
-                ),
-
-                mark=mark,
-
-                exit_decision=(
-                    decision
-                ),
-
-                close=close,
-            )
-
-        if close.status == "NO_POSITION":
-            unregister_open_shadow_mint(
-                mint,
-                db_path=db_path,
-            )
-
-        return ShadowPositionEventResult(
-            manager_version=(
-                SHADOW_POSITION_MANAGER_VERSION
-            ),
-
-            status="UNKNOWN",
-            reason=(
-                "POSITION_CLOSE_FAILED:"
-                f"{close.status}"
-            ),
-
-            mint=mint,
-
-            fee_status=(
-                fee_status
-            ),
-
-            protocol_fee_bps=int(
-                protocol_fee_bps
-            ),
-
-            creator_fee_bps=int(
-                creator_fee_bps
-            ),
-
-            mark=mark,
-
-            exit_decision=(
-                decision
-            ),
-
-            close=close,
+        _event_dirty_mints.discard(
+            mint
         )

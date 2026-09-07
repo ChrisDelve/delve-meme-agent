@@ -18,8 +18,8 @@ from src.portfolio.shadow_portfolio import (
     close_shadow_position,
     list_open_shadow_mints,
     mark_open_position,
+    write_off_shadow_position,
 )
-
 from src.strategies.shadow_exit_engine import (
     ShadowExitDecision,
     evaluate_shadow_exit,
@@ -236,6 +236,94 @@ async def sweep_shadow_position(
 
                 realized_pnl_lamports=None,
             )
+
+
+        if (
+            mark.status == "UNEXITABLE"
+            and mark.sell_simulation is not None
+            and (
+                mark.sell_simulation.ineligible_reason
+                == "INSUFFICIENT_REAL_QUOTE_RESERVES"
+            )
+        ):
+                #
+                # This is intentionally a very narrow
+                # write-off condition.
+                #
+                # Even if every remaining lamport of
+                # real quote liquidity were recoverable,
+                # it would not cover transaction overhead.
+                #
+                # Therefore the currently supported Pump
+                # route has zero economic wallet recovery.
+                #
+                total_exit_overhead = (
+                    SHADOW_EXIT_BASE_NETWORK_FEE_LAMPORTS
+                    + SHADOW_EXIT_PRIORITY_FEE_LAMPORTS
+                )
+
+                if (
+                    int(
+                        curve_state.real_quote_reserves
+                    )
+                    <= int(
+                        total_exit_overhead
+                    )
+                ):
+                    write_off = (
+                        write_off_shadow_position(
+                            mint=mint,
+                            exit_reason=(
+                                "UNEXITABLE_ZERO_RECOVERY"
+                            ),
+                            exit_timestamp=int(
+                                evaluated_at
+                            ),
+                            db_path=db_path,
+                        )
+                    )
+
+                    if write_off.status in (
+                        "CLOSED",
+                        "NO_POSITION",
+                    ):
+                        unregister_open_shadow_mint(
+                            mint,
+                            db_path=db_path,
+                        )
+
+                    return ShadowSweepResult(
+                        sweeper_version=(
+                            SHADOW_SWEEPER_VERSION
+                        ),
+
+                        mint=mint,
+
+                        status=(
+                            write_off.status
+                        ),
+
+                        reason=(
+                            write_off.exit_reason
+                        ),
+
+                        protocol_fee_bps=int(
+                            fee_state.protocol_fee_bps
+                        ),
+
+                        creator_fee_bps=int(
+                            fee_state.creator_fee_bps
+                        ),
+
+                        mark_value_lamports=0,
+
+                        exit_decision=None,
+
+                        realized_pnl_lamports=(
+                            write_off
+                            .realized_pnl_lamports
+                        ),
+                    )
 
         if mark.status != "MARKED":
             return ShadowSweepResult(

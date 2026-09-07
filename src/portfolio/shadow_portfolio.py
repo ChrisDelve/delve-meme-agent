@@ -1877,6 +1877,226 @@ def close_shadow_position(
     finally:
         connection.close()
 
+def write_off_shadow_position(
+    *,
+    mint: str,
+    exit_reason: str,
+    exit_timestamp: int | None = None,
+    db_path: Path = DB_PATH,
+) -> ShadowCloseResult:
+
+    if not exit_reason.strip():
+        raise ValueError(
+            "exit_reason must not be empty."
+        )
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        ensure_account(
+            connection
+        )
+
+        account_before = refresh_account(
+            connection
+        )
+
+        position = connection.execute(
+            """
+            SELECT *
+            FROM shadow_positions
+            WHERE mint = ?
+              AND status = 'OPEN'
+            LIMIT 1
+            """,
+            (
+                mint,
+            ),
+        ).fetchone()
+
+        if position is None:
+            connection.commit()
+
+            return ShadowCloseResult(
+                status="NO_POSITION",
+                reasons=(),
+
+                position_id=None,
+                mint=mint,
+
+                exit_reason=None,
+
+                tokens_sold=0,
+
+                gross_quote_lamports=0,
+                net_proceeds_lamports=0,
+                realized_pnl_lamports=0,
+
+                sell_simulation=None,
+
+                account_before=(
+                    account_before
+                ),
+
+                account_after=(
+                    account_before
+                ),
+            )
+
+        if exit_timestamp is None:
+            exit_timestamp = int(
+                time.time()
+            )
+
+        wallet_cost = int(
+            position[
+                "entry_wallet_cost_lamports"
+            ]
+        )
+
+        realized_pnl = (
+            -wallet_cost
+        )
+
+        now = int(
+            time.time()
+        )
+
+        updated = connection.execute(
+            """
+            UPDATE shadow_positions
+            SET
+                status = 'CLOSED',
+
+                latest_mark_value_lamports = 0,
+                unrealized_pnl_lamports = 0,
+
+                exit_timestamp = ?,
+                exit_reason = ?,
+
+                exit_protocol_fee_bps = NULL,
+                exit_creator_fee_bps = NULL,
+
+                exit_gross_quote_lamports = 0,
+                exit_net_proceeds_lamports = 0,
+
+                realized_pnl_lamports = ?,
+
+                updated_at = ?
+
+            WHERE id = ?
+              AND status = 'OPEN'
+            """,
+            (
+                int(
+                    exit_timestamp
+                ),
+                exit_reason,
+                realized_pnl,
+                now,
+                int(
+                    position["id"]
+                ),
+            ),
+        )
+
+        if updated.rowcount != 1:
+            connection.rollback()
+
+            return ShadowCloseResult(
+                status="UNKNOWN",
+                reasons=(
+                    "POSITION_WRITE_OFF_RACE",
+                ),
+
+                position_id=int(
+                    position["id"]
+                ),
+                mint=mint,
+
+                exit_reason=(
+                    exit_reason
+                ),
+
+                tokens_sold=0,
+
+                gross_quote_lamports=0,
+                net_proceeds_lamports=0,
+                realized_pnl_lamports=0,
+
+                sell_simulation=None,
+
+                account_before=(
+                    account_before
+                ),
+
+                account_after=None,
+            )
+
+        #
+        # No cash is credited.
+        #
+        # The entry cost was already debited when
+        # the position opened. Closing the position
+        # at zero therefore realizes the entire
+        # remaining cost basis as a loss.
+        #
+        account_after = refresh_account(
+            connection
+        )
+
+        connection.commit()
+
+        return ShadowCloseResult(
+            status="CLOSED",
+            reasons=(),
+
+            position_id=int(
+                position["id"]
+            ),
+            mint=mint,
+
+            exit_reason=(
+                exit_reason
+            ),
+
+            #
+            # This is an accounting write-off,
+            # not a fabricated token sale.
+            #
+            tokens_sold=0,
+
+            gross_quote_lamports=0,
+            net_proceeds_lamports=0,
+
+            realized_pnl_lamports=(
+                realized_pnl
+            ),
+
+            sell_simulation=None,
+
+            account_before=(
+                account_before
+            ),
+
+            account_after=(
+                account_after
+            ),
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
 def list_open_shadow_mints(
     *,
     db_path: Path = DB_PATH,

@@ -482,3 +482,106 @@ def calculate_exact_input_sell(
             reason
         ),
     )
+
+def find_max_liquidity_feasible_sell(
+    *,
+    state: PumpCurveState,
+    maximum_tokens_to_sell: int,
+
+    protocol_fee_bps: int,
+    creator_fee_bps: int,
+
+    slippage_bps: int,
+    base_network_fee_lamports: int,
+    priority_fee_lamports: int,
+) -> tuple[
+    int,
+    PumpSellSimulation | None,
+]:
+    """
+    Find the largest integer token amount whose
+    modeled gross quote output can be paid by the
+    current real quote reserves.
+
+    This function solves only the Pump liquidity
+    boundary. It deliberately does not use
+    simulation.executable as the binary-search
+    predicate because executability also includes
+    zero-output and fee-economics constraints.
+
+    The caller must separately evaluate the
+    returned simulation for economic recovery.
+    """
+
+    maximum_tokens_to_sell = int(
+        maximum_tokens_to_sell
+    )
+
+    if maximum_tokens_to_sell <= 0:
+        return (
+            0,
+            None,
+        )
+
+    low = 1
+    high = maximum_tokens_to_sell
+
+    best_tokens = 0
+    best_simulation = None
+
+    while low <= high:
+        midpoint = (
+            low
+            + high
+        ) // 2
+
+        simulation = (
+            calculate_exact_input_sell(
+                state=state,
+
+                tokens_in=midpoint,
+
+                protocol_fee_bps=int(
+                    protocol_fee_bps
+                ),
+
+                creator_fee_bps=int(
+                    creator_fee_bps
+                ),
+
+                slippage_bps=int(
+                    slippage_bps
+                ),
+
+                base_network_fee_lamports=int(
+                    base_network_fee_lamports
+                ),
+
+                priority_fee_lamports=int(
+                    priority_fee_lamports
+                ),
+            )
+        )
+
+        liquidity_feasible = (
+            int(
+                simulation.gross_quote_out
+            )
+            <= int(
+                state.real_quote_reserves
+            )
+        )
+
+        if liquidity_feasible:
+            best_tokens = midpoint
+            best_simulation = simulation
+
+            low = midpoint + 1
+
+        else:
+            high = midpoint - 1
+
+    return (
+        best_tokens,
+        best_simulation,
+    )

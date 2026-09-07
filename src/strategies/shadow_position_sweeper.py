@@ -36,7 +36,6 @@ from src.strategies.shadow_position_runtime import (
     SHADOW_EXIT_PRIORITY_FEE_LAMPORTS,
     SHADOW_EXIT_SLIPPAGE_BPS,
     get_shadow_position_lock,
-    initialize_shadow_position_manager,
     unregister_open_shadow_mint,
 )
 
@@ -1284,10 +1283,6 @@ async def run_shadow_position_sweeper(
         raise ValueError(
             "interval_seconds must be positive."
         )
-
-    initialize_shadow_position_manager(
-        db_path=db_path
-    )
 
     while True:
         started_at = (

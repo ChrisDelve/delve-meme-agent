@@ -346,6 +346,9 @@ def init_schema(
             latest_mark_timestamp
                 INTEGER NOT NULL,
 
+            exit_pending_reason TEXT,
+            exit_pending_since INTEGER,
+
             exit_timestamp INTEGER,
             exit_reason TEXT,
 
@@ -493,6 +496,30 @@ def init_schema(
                     0
                 )
             WHERE status = 'CLOSED'
+            """
+        )
+
+    if (
+        "exit_pending_reason"
+        not in position_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE shadow_positions
+            ADD COLUMN
+                exit_pending_reason TEXT
+            """
+        )
+
+    if (
+        "exit_pending_since"
+        not in position_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE shadow_positions
+            ADD COLUMN
+                exit_pending_since INTEGER
             """
         )
 

@@ -368,6 +368,97 @@ def _row_to_entry(
     )
 
 
+def load_transaction_journal_entry_read_only(
+    *,
+    reservation_id: str,
+    db_path: Path = DB_PATH,
+) -> LiveTransactionJournalEntry | None:
+    """
+    Read one live transaction journal entry without
+    mutating the authoritative live database.
+
+    This loader intentionally performs:
+    - no schema initialization
+    - no schema migration
+    - no reservation transition
+    - no journal write
+    - no write-capable database open
+
+    It exists for observational reconciliation and
+    crash/concurrency recovery paths.
+    """
+
+    if not isinstance(
+        reservation_id,
+        str,
+    ):
+        return None
+
+    reservation_id = (
+        reservation_id.strip()
+    )
+
+    if not reservation_id:
+        return None
+
+    if not db_path.exists():
+        return None
+
+    database_uri = (
+        db_path.resolve().as_uri()
+        + "?mode=ro"
+    )
+
+    connection = sqlite3.connect(
+        database_uri,
+        uri=True,
+        timeout=30.0,
+    )
+
+    connection.row_factory = sqlite3.Row
+
+    connection.execute(
+        "PRAGMA query_only = ON"
+    )
+
+    connection.execute(
+        "PRAGMA busy_timeout = 30000"
+    )
+
+    try:
+        try:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM live_transaction_journal
+                WHERE reservation_id = ?
+                """,
+                (
+                    reservation_id,
+                ),
+            ).fetchone()
+
+        except sqlite3.OperationalError as error:
+            if (
+                "no such table:"
+                " live_transaction_journal"
+                in str(error)
+            ):
+                return None
+
+            raise
+
+        if row is None:
+            return None
+
+        return _row_to_entry(
+            row
+        )
+
+    finally:
+        connection.close()
+
+
 def record_failed_transaction_and_release_reservation(
     *,
     reservation_id: str,

@@ -21,6 +21,7 @@ from src.portfolio.live_transaction_journal import (
     RECONCILED_FAILED_TRANSACTION_REASON,
     UNKNOWN,
     init_schema as init_journal_schema,
+    load_transaction_journal_entry_read_only,
     record_failed_transaction_and_release_reservation,
 )
 
@@ -224,6 +225,112 @@ class LiveTransactionJournalTests(
         )
 
         return values
+
+    def test_read_only_loader_returns_none_before_journal_entry(
+        self,
+    ):
+        entry = (
+            load_transaction_journal_entry_read_only(
+                reservation_id=(
+                    self.reservation_id
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertIsNone(
+            entry
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            row = connection.execute(
+                """
+                SELECT status
+                FROM live_capital_reservations
+                WHERE reservation_id = ?
+                """,
+                (
+                    self.reservation_id,
+                ),
+            ).fetchone()
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            row["status"],
+            SIGNED,
+        )
+
+    def test_read_only_loader_returns_committed_failed_entry(
+        self,
+    ):
+        transition = (
+            record_failed_transaction_and_release_reservation(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            transition.status,
+            PASS,
+        )
+
+        entry = (
+            load_transaction_journal_entry_read_only(
+                reservation_id=(
+                    self.reservation_id
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertIsNotNone(
+            entry
+        )
+
+        self.assertEqual(
+            entry.reservation_id,
+            self.reservation_id,
+        )
+
+        self.assertEqual(
+            entry.transaction_signature,
+            self.signature,
+        )
+
+        self.assertEqual(
+            entry.outcome,
+            FAILED,
+        )
+
+        self.assertEqual(
+            entry.signed_transaction_sha256,
+            self.transaction_sha256,
+        )
+
+        self.assertEqual(
+            entry.receipt_transaction_sha256,
+            self.transaction_sha256,
+        )
+
+        self.assertEqual(
+            entry.wallet_pubkey,
+            self.wallet_pubkey,
+        )
+
+        self.assertEqual(
+            entry.fee_lamports,
+            9_000,
+        )
+
+        self.assertEqual(
+            entry.fee_payer_balance_delta_lamports,
+            -9_000,
+        )
 
     def test_signed_failed_transaction_journals_and_releases_atomically(
         self,

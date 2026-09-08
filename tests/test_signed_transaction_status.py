@@ -21,6 +21,7 @@ from src.execution.signed_transaction_status import (
 from src.portfolio.live_reservations import (
     RESERVATION_VERSION,
     SIGNED,
+    SUBMITTED,
     LiveCapitalReservation,
 )
 
@@ -261,6 +262,82 @@ class SignedTransactionStatusTests(
             result,
             rpc,
             load_mock,
+        )
+
+    async def test_submitted_reservation_remains_status_resolvable(
+        self,
+    ):
+        reservation = replace(
+            self.reservation,
+            status=SUBMITTED,
+            submission_started_at=3.5,
+            submission_attempt_count=1,
+            submitted_at=4.0,
+        )
+
+        rpc = FakeStatusRpc(
+            recent_response=(
+                self.status_response(
+                    self.known_status()
+                )
+            ),
+        )
+
+        result, rpc, _ = await self.resolve(
+            reservation=reservation,
+            rpc=rpc,
+        )
+
+        self.assertEqual(
+            result.state,
+            KNOWN,
+        )
+
+        self.assertEqual(
+            result.status_source,
+            RECENT,
+        )
+
+        self.assertEqual(
+            [call[0] for call in rpc.calls],
+            [
+                "getSignatureStatuses",
+            ],
+        )
+
+    async def test_inconsistent_submitted_metadata_stops_before_rpc(
+        self,
+    ):
+        reservation = replace(
+            self.reservation,
+            status=SUBMITTED,
+            submission_started_at=None,
+            submission_attempt_count=0,
+            submitted_at=None,
+        )
+
+        rpc = FakeStatusRpc(
+            recent_response=None,
+        )
+
+        result, rpc, _ = await self.resolve(
+            reservation=reservation,
+            rpc=rpc,
+        )
+
+        self.assertEqual(
+            result.state,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "SUBMISSION_METADATA_INCONSISTENT",
+            result.reasons,
+        )
+
+        self.assertEqual(
+            rpc.calls,
+            [],
         )
 
     async def test_known_recent_success_stops_before_height(

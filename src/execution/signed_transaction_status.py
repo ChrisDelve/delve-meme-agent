@@ -10,6 +10,7 @@ from src.portfolio.live_reservations import (
     DB_PATH,
     RESERVATION_VERSION,
     SIGNED,
+    SUBMITTED,
     SQLITE_INT_MAX,
     LiveCapitalReservation,
     load_capital_reservation_read_only,
@@ -21,7 +22,7 @@ from src.safety.token_safety_resolver import (
 
 
 SIGNED_TRANSACTION_STATUS_RESOLVER_VERSION = (
-    "signed-transaction-status-resolver-v1"
+    "signed-transaction-status-resolver-v2"
 )
 
 KNOWN = "KNOWN"
@@ -94,10 +95,67 @@ def _validate_signed_reservation(
             "RESERVATION_VERSION_MISMATCH"
         )
 
-    if reservation.status != SIGNED:
+    if reservation.status not in (
+        SIGNED,
+        SUBMITTED,
+    ):
         reasons.append(
-            "RESERVATION_NOT_SIGNED"
+            "RESERVATION_NOT_SIGNED_OR_SUBMITTED"
         )
+
+    #
+    # Submission metadata must agree with the
+    # reservation lifecycle state.
+    #
+    # SIGNED may be:
+    # - unarmed: definitely before durable send
+    #   boundary
+    # - armed: transaction MAY have been relayed
+    #
+    # SUBMITTED means RPC returned the exact
+    # persisted signature, so all submission
+    # metadata must exist coherently.
+    #
+    if reservation.status == SIGNED:
+        if reservation.submitted_at is not None:
+            reasons.append(
+                "SUBMISSION_METADATA_INCONSISTENT"
+            )
+
+        if (
+            reservation.submission_started_at
+            is None
+        ):
+            if (
+                reservation
+                .submission_attempt_count
+                != 0
+            ):
+                reasons.append(
+                    "SUBMISSION_METADATA_INCONSISTENT"
+                )
+
+        elif (
+            reservation.submission_attempt_count
+            < 1
+        ):
+            reasons.append(
+                "SUBMISSION_METADATA_INCONSISTENT"
+            )
+
+    elif reservation.status == SUBMITTED:
+        if (
+            reservation.submission_started_at
+            is None
+            or reservation
+            .submission_attempt_count
+            < 1
+            or reservation.submitted_at
+            is None
+        ):
+            reasons.append(
+                "SUBMISSION_METADATA_INCONSISTENT"
+            )
 
     signature_text = (
         reservation.transaction_signature

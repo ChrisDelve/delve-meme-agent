@@ -19,6 +19,8 @@ from src.portfolio.live_reservations import (
     init_schema,
     load_capital_reservation,
     load_capital_reservation_read_only,
+    acknowledge_reservation_submitted,
+    arm_reservation_submission,
     bind_reservation_signed_transaction,
     release_active_reservation,
     reserve_pump_buy_capital,
@@ -672,6 +674,335 @@ class LiveReservationTests(unittest.TestCase):
             SIGNED,
         )
 
+    def test_submission_boundary_is_durable_and_rearm_blocks(
+        self,
+    ):
+        result = self.reserve(
+            "MintSubmissionBoundary"
+        )
+
+        signed = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureSubmissionBoundary"
+            ),
+        )
+
+        self.assertEqual(
+            signed.status,
+            "PASS",
+        )
+
+        first = arm_reservation_submission(
+            reservation_id=(
+                signed.reservation
+                .reservation_id
+            ),
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            first.status,
+            "PASS",
+        )
+
+        self.assertTrue(
+            first.changed
+        )
+
+        self.assertEqual(
+            first.reservation.status,
+            SIGNED,
+        )
+
+        self.assertIsNotNone(
+            first.reservation
+            .submission_started_at
+        )
+
+        self.assertEqual(
+            first.reservation
+            .submission_attempt_count,
+            1,
+        )
+
+        self.assertIsNone(
+            first.reservation.submitted_at
+        )
+
+        started_at = (
+            first.reservation
+            .submission_started_at
+        )
+
+        retry = arm_reservation_submission(
+            reservation_id=(
+                signed.reservation
+                .reservation_id
+            ),
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            retry.status,
+            "BLOCK",
+        )
+
+        self.assertIn(
+            "SUBMISSION_ALREADY_ARMED_REQUIRES_RECONCILIATION",
+            retry.reasons,
+        )
+
+        self.assertFalse(
+            retry.changed
+        )
+
+        self.assertEqual(
+            retry.reservation
+            .submission_started_at,
+            started_at,
+        )
+
+        self.assertEqual(
+            retry.reservation
+            .submission_attempt_count,
+            1,
+        )
+
+    def test_submission_boundary_requires_signed(
+        self,
+    ):
+        result = self.reserve(
+            "MintSubmissionRequiresSigned"
+        )
+
+        armed = arm_reservation_submission(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            armed.status,
+            "BLOCK",
+        )
+
+        self.assertIn(
+            "RESERVATION_NOT_SIGNED",
+            armed.reasons,
+        )
+
+        self.assertFalse(
+            armed.changed
+        )
+
+    def test_acknowledge_submitted_requires_armed_boundary(
+        self,
+    ):
+        result = self.reserve(
+            "MintSubmissionRequiresArm"
+        )
+
+        signed = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureRequiresArm"
+            ),
+        )
+
+        acknowledged = (
+            acknowledge_reservation_submitted(
+                reservation_id=(
+                    signed.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    "SignatureRequiresArm"
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            acknowledged.status,
+            "BLOCK",
+        )
+
+        self.assertIn(
+            "SUBMISSION_NOT_ARMED",
+            acknowledged.reasons,
+        )
+
+        self.assertEqual(
+            acknowledged.reservation.status,
+            SIGNED,
+        )
+
+    def test_acknowledge_submitted_requires_matching_signature(
+        self,
+    ):
+        result = self.reserve(
+            "MintSubmissionSignatureMismatch"
+        )
+
+        signed = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureExpected"
+            ),
+        )
+
+        armed = arm_reservation_submission(
+            reservation_id=(
+                signed.reservation
+                .reservation_id
+            ),
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            armed.status,
+            "PASS",
+        )
+
+        acknowledged = (
+            acknowledge_reservation_submitted(
+                reservation_id=(
+                    signed.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    "SignatureWrong"
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            acknowledged.status,
+            "BLOCK",
+        )
+
+        self.assertIn(
+            "RESERVATION_SIGNATURE_MISMATCH",
+            acknowledged.reasons,
+        )
+
+        self.assertEqual(
+            acknowledged.reservation.status,
+            SIGNED,
+        )
+
+    def test_acknowledge_submitted_is_durable_and_idempotent(
+        self,
+    ):
+        result = self.reserve(
+            "MintSubmissionAcknowledged"
+        )
+
+        signature = (
+            "SignatureAcknowledged"
+        )
+
+        signed = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=signature,
+        )
+
+        armed = arm_reservation_submission(
+            reservation_id=(
+                signed.reservation
+                .reservation_id
+            ),
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            armed.status,
+            "PASS",
+        )
+
+        first = (
+            acknowledge_reservation_submitted(
+                reservation_id=(
+                    signed.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    signature
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            first.status,
+            "PASS",
+        )
+
+        self.assertTrue(
+            first.changed
+        )
+
+        self.assertEqual(
+            first.reservation.status,
+            SUBMITTED,
+        )
+
+        self.assertIsNotNone(
+            first.reservation.submitted_at
+        )
+
+        submitted_at = (
+            first.reservation.submitted_at
+        )
+
+        retry = (
+            acknowledge_reservation_submitted(
+                reservation_id=(
+                    signed.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    signature
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            retry.status,
+            "PASS",
+        )
+
+        self.assertFalse(
+            retry.changed
+        )
+
+        self.assertEqual(
+            retry.reservation.status,
+            SUBMITTED,
+        )
+
+        self.assertEqual(
+            retry.reservation.submitted_at,
+            submitted_at,
+        )
+
     def test_submitted_reservation_remains_held(
         self,
     ):
@@ -685,32 +1016,56 @@ class LiveReservationTests(unittest.TestCase):
             "PASS",
         )
 
-        connection = get_connection(
-            self.db_path
+        signed = self.bind_signed(
+            reservation_id=(
+                first.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureSubmittedHeld"
+            ),
         )
 
-        try:
-            connection.execute(
-                """
-                UPDATE live_capital_reservations
+        self.assertEqual(
+            signed.status,
+            "PASS",
+        )
 
-                SET
-                    status = ?,
-                    expires_at = 0
+        armed = arm_reservation_submission(
+            reservation_id=(
+                first.reservation
+                .reservation_id
+            ),
+            db_path=self.db_path,
+        )
 
-                WHERE reservation_id = ?
-                """,
-                (
-                    SUBMITTED,
+        self.assertEqual(
+            armed.status,
+            "PASS",
+        )
+
+        submitted = (
+            acknowledge_reservation_submitted(
+                reservation_id=(
                     first.reservation
-                    .reservation_id,
+                    .reservation_id
                 ),
+                transaction_signature=(
+                    "SignatureSubmittedHeld"
+                ),
+                db_path=self.db_path,
             )
+        )
 
-            connection.commit()
+        self.assertEqual(
+            submitted.status,
+            "PASS",
+        )
 
-        finally:
-            connection.close()
+        self.assertEqual(
+            submitted.reservation.status,
+            SUBMITTED,
+        )
 
         second = self.reserve(
             "MintAfterSubmitted",

@@ -81,6 +81,18 @@ class LiveCapitalReservation:
     last_valid_block_height: int | None = None
     blockhash_rpc_slot: int | None = None
 
+    # Durable pre-send boundary.
+    #
+    # submission_started_at means the transaction
+    # MAY have been relayed. It does not prove that
+    # an RPC call occurred or was accepted.
+    submission_started_at: float | None = None
+    submission_attempt_count: int = 0
+
+    # Set only after the RPC returns the exact
+    # already-persisted transaction signature.
+    submitted_at: float | None = None
+
 
 @dataclass(frozen=True)
 class ReservationTransitionResult:
@@ -197,6 +209,11 @@ def init_schema(
             recent_blockhash TEXT,
             last_valid_block_height INTEGER,
             blockhash_rpc_slot INTEGER,
+
+            submission_started_at REAL,
+            submission_attempt_count
+                INTEGER NOT NULL DEFAULT 0,
+            submitted_at REAL,
 
             terminal_at REAL,
             terminal_reason TEXT
@@ -319,6 +336,40 @@ def init_schema(
             """
             ALTER TABLE live_capital_reservations
             ADD COLUMN blockhash_rpc_slot INTEGER
+            """
+        )
+
+    if (
+        "submission_started_at"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN submission_started_at REAL
+            """
+        )
+
+    if (
+        "submission_attempt_count"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN submission_attempt_count
+                INTEGER NOT NULL DEFAULT 0
+            """
+        )
+
+    if (
+        "submitted_at"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN submitted_at REAL
             """
         )
 
@@ -778,6 +829,9 @@ def reserve_pump_buy_capital(
             recent_blockhash=None,
             last_valid_block_height=None,
             blockhash_rpc_slot=None,
+            submission_started_at=None,
+            submission_attempt_count=0,
+            submitted_at=None,
         )
 
         connection.execute(
@@ -960,6 +1014,50 @@ def _row_to_reservation(
             if row["blockhash_rpc_slot"] is None
             else int(
                 row["blockhash_rpc_slot"]
+            )
+        ),
+        submission_started_at=(
+            None
+            if (
+                "submission_started_at"
+                not in row.keys()
+                or row[
+                    "submission_started_at"
+                ]
+                is None
+            )
+            else float(
+                row[
+                    "submission_started_at"
+                ]
+            )
+        ),
+        submission_attempt_count=(
+            0
+            if (
+                "submission_attempt_count"
+                not in row.keys()
+                or row[
+                    "submission_attempt_count"
+                ]
+                is None
+            )
+            else int(
+                row[
+                    "submission_attempt_count"
+                ]
+            )
+        ),
+        submitted_at=(
+            None
+            if (
+                "submitted_at"
+                not in row.keys()
+                or row["submitted_at"]
+                is None
+            )
+            else float(
+                row["submitted_at"]
             )
         ),
     )
@@ -1528,6 +1626,515 @@ def bind_reservation_signed_transaction(
         ).fetchone()
 
         connection.commit()
+
+        return ReservationTransitionResult(
+            status="PASS",
+            reasons=(),
+            reservation=_row_to_reservation(
+                row
+            ),
+            changed=True,
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+def arm_reservation_submission(
+    *,
+    reservation_id: str,
+    db_path: Path = DB_PATH,
+) -> ReservationTransitionResult:
+    """
+    Durably cross the pre-send boundary for one
+    already-SIGNED transaction.
+
+    Once this succeeds, downstream recovery must
+    conservatively assume that the exact persisted
+    signed transaction MAY have been relayed.
+
+    This function does not perform network I/O.
+
+    An already-armed reservation does not acquire
+    another send boundary. It is blocked and must
+    be reconciled before any further relay decision.
+
+    Re-arming is non-mutating and never increments
+    the attempt count.
+    """
+
+    reservation_id = reservation_id.strip()
+
+    if not reservation_id:
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_RESERVATION_ID",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    now = time.time()
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        init_schema(
+            connection
+        )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_NOT_FOUND",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        reservation = _row_to_reservation(
+            row
+        )
+
+        if reservation.status == SUBMITTED:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_ALREADY_SUBMITTED",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if reservation.status != SIGNED:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_NOT_SIGNED",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if (
+            reservation.signed_at is None
+            or reservation.transaction_signature
+            is None
+            or reservation.signed_message_sha256
+            is None
+            or reservation.signed_transaction_sha256
+            is None
+            or reservation.signed_transaction_bytes
+            is None
+            or reservation.recent_blockhash
+            is None
+            or reservation.last_valid_block_height
+            is None
+            or reservation.blockhash_rpc_slot
+            is None
+        ):
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "SIGNED_ARTIFACT_INCOMPLETE",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if reservation.submitted_at is not None:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "SUBMISSION_METADATA_INCONSISTENT",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if (
+            reservation.submission_started_at
+            is not None
+        ):
+            if (
+                reservation
+                .submission_attempt_count
+                != 1
+            ):
+                connection.commit()
+
+                return (
+                    ReservationTransitionResult(
+                        status=UNKNOWN,
+                        reasons=(
+                            "SUBMISSION_METADATA_INCONSISTENT",
+                        ),
+                        reservation=reservation,
+                        changed=False,
+                    )
+                )
+
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "SUBMISSION_ALREADY_ARMED_REQUIRES_RECONCILIATION",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if (
+            reservation.submission_attempt_count
+            != 0
+        ):
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "SUBMISSION_METADATA_INCONSISTENT",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        updated = connection.execute(
+            """
+            UPDATE live_capital_reservations
+
+            SET
+                submission_started_at = ?,
+                submission_attempt_count = 1
+
+            WHERE reservation_id = ?
+              AND status = ?
+              AND submission_started_at IS NULL
+              AND submission_attempt_count = 0
+              AND submitted_at IS NULL
+            """,
+            (
+                now,
+                reservation_id,
+                SIGNED,
+            ),
+        )
+
+        if updated.rowcount != 1:
+            connection.rollback()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "SUBMISSION_ARM_TRANSITION_FAILED",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        connection.commit()
+
+        if row is None:
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "SUBMISSION_ARMED_RESERVATION_MISSING",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        return ReservationTransitionResult(
+            status="PASS",
+            reasons=(),
+            reservation=_row_to_reservation(
+                row
+            ),
+            changed=True,
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+def acknowledge_reservation_submitted(
+    *,
+    reservation_id: str,
+    transaction_signature: str,
+    db_path: Path = DB_PATH,
+) -> ReservationTransitionResult:
+    """
+    Atomically mark an armed SIGNED reservation as
+    SUBMITTED only after an RPC caller has received
+    the exact already-persisted transaction
+    signature.
+
+    This function does not perform network I/O.
+    """
+
+    reservation_id = reservation_id.strip()
+    transaction_signature = (
+        transaction_signature.strip()
+    )
+
+    if not reservation_id:
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_RESERVATION_ID",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    if not transaction_signature:
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_TRANSACTION_SIGNATURE",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    now = time.time()
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        init_schema(
+            connection
+        )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_NOT_FOUND",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        reservation = _row_to_reservation(
+            row
+        )
+
+        if (
+            reservation.transaction_signature
+            != transaction_signature
+        ):
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_SIGNATURE_MISMATCH",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if reservation.status == SUBMITTED:
+            if (
+                reservation.submission_started_at
+                is None
+                or reservation
+                .submission_attempt_count
+                < 1
+                or reservation.submitted_at
+                is None
+            ):
+                connection.commit()
+
+                return (
+                    ReservationTransitionResult(
+                        status=UNKNOWN,
+                        reasons=(
+                            "SUBMISSION_METADATA_INCONSISTENT",
+                        ),
+                        reservation=reservation,
+                        changed=False,
+                    )
+                )
+
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="PASS",
+                reasons=(),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if reservation.status != SIGNED:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_NOT_SIGNED",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if reservation.submitted_at is not None:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "SUBMISSION_METADATA_INCONSISTENT",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if (
+            reservation.submission_started_at
+            is None
+            or reservation
+            .submission_attempt_count
+            < 1
+        ):
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "SUBMISSION_NOT_ARMED",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        updated = connection.execute(
+            """
+            UPDATE live_capital_reservations
+
+            SET
+                status = ?,
+                submitted_at = ?
+
+            WHERE reservation_id = ?
+              AND status = ?
+              AND transaction_signature = ?
+              AND submission_started_at IS NOT NULL
+              AND submission_attempt_count >= 1
+              AND submitted_at IS NULL
+            """,
+            (
+                SUBMITTED,
+                now,
+                reservation_id,
+                SIGNED,
+                transaction_signature,
+            ),
+        )
+
+        if updated.rowcount != 1:
+            connection.rollback()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "SUBMITTED_TRANSITION_FAILED",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        connection.commit()
+
+        if row is None:
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "SUBMITTED_RESERVATION_MISSING",
+                ),
+                reservation=None,
+                changed=False,
+            )
 
         return ReservationTransitionResult(
             status="PASS",

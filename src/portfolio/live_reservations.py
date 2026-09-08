@@ -38,6 +38,10 @@ SUBMITTED = "SUBMITTED"
 RELEASED = "RELEASED"
 EXPIRED = "EXPIRED"
 
+RECONCILED_ABSENT_EXPIRED_REASON = (
+    "RECONCILED_ABSENT_EXPIRED"
+)
+
 BUY = "BUY"
 
 SQLITE_INT_MAX = (1 << 63) - 1
@@ -92,6 +96,10 @@ class LiveCapitalReservation:
     # Set only after the RPC returns the exact
     # already-persisted transaction signature.
     submitted_at: float | None = None
+
+    # Terminal lifecycle provenance.
+    terminal_at: float | None = None
+    terminal_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1058,6 +1066,30 @@ def _row_to_reservation(
             )
             else float(
                 row["submitted_at"]
+            )
+        ),
+        terminal_at=(
+            None
+            if (
+                "terminal_at"
+                not in row.keys()
+                or row["terminal_at"]
+                is None
+            )
+            else float(
+                row["terminal_at"]
+            )
+        ),
+        terminal_reason=(
+            None
+            if (
+                "terminal_reason"
+                not in row.keys()
+                or row["terminal_reason"]
+                is None
+            )
+            else str(
+                row["terminal_reason"]
             )
         ),
     )
@@ -2349,6 +2381,361 @@ def release_active_reservation(
             reservation=_row_to_reservation(
                 row
             ),
+            changed=True,
+        )
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+def release_reconciled_absent_expired_reservation(
+    *,
+    reservation_id: str,
+    transaction_signature: str,
+    signed_transaction_sha256: str,
+    last_valid_block_height: int,
+    blockhash_rpc_slot: int,
+    db_path: Path = DB_PATH,
+) -> ReservationTransitionResult:
+    """
+    Atomically release a SIGNED or SUBMITTED
+    reservation only after an external reconciliation
+    authority has proven the exact signed transaction
+    is ABSENT_EXPIRED.
+
+    This function does not perform chain observation.
+    It only performs the terminal ledger mutation.
+
+    Exact persisted transaction identity is required
+    so stale or mismatched reconciliation evidence
+    cannot release unrelated held capital.
+    """
+
+    if not isinstance(
+        reservation_id,
+        str,
+    ):
+        reservation_id = ""
+
+    if not isinstance(
+        transaction_signature,
+        str,
+    ):
+        transaction_signature = ""
+
+    if not isinstance(
+        signed_transaction_sha256,
+        str,
+    ):
+        signed_transaction_sha256 = ""
+
+    reservation_id = reservation_id.strip()
+    transaction_signature = (
+        transaction_signature.strip()
+    )
+    signed_transaction_sha256 = (
+        signed_transaction_sha256.strip()
+    )
+
+    if not reservation_id:
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_RESERVATION_ID",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    if not transaction_signature:
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_TRANSACTION_SIGNATURE",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    if (
+        len(signed_transaction_sha256) != 64
+        or any(
+            character
+            not in "0123456789abcdef"
+            for character
+            in signed_transaction_sha256
+        )
+    ):
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_SIGNED_TRANSACTION_SHA256",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    for (
+        value,
+        reason,
+    ) in (
+        (
+            last_valid_block_height,
+            "INVALID_LAST_VALID_BLOCK_HEIGHT",
+        ),
+        (
+            blockhash_rpc_slot,
+            "INVALID_BLOCKHASH_RPC_SLOT",
+        ),
+    ):
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > SQLITE_INT_MAX
+        ):
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(reason,),
+                reservation=None,
+                changed=False,
+            )
+
+    now = time.time()
+    connection = get_connection(db_path)
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        init_schema(connection)
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_NOT_FOUND",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        reservation = _row_to_reservation(
+            row
+        )
+
+        if (
+            reservation.reservation_version
+            != RESERVATION_VERSION
+        ):
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_VERSION_MISMATCH",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        evidence_matches = (
+            reservation.transaction_signature
+            == transaction_signature
+            and reservation
+            .signed_transaction_sha256
+            == signed_transaction_sha256
+            and reservation
+            .last_valid_block_height
+            == last_valid_block_height
+            and reservation.blockhash_rpc_slot
+            == blockhash_rpc_slot
+        )
+
+        if reservation.status == RELEASED:
+            if (
+                reservation.terminal_reason
+                != RECONCILED_ABSENT_EXPIRED_REASON
+            ):
+                connection.commit()
+
+                return ReservationTransitionResult(
+                    status="BLOCK",
+                    reasons=(
+                        "RECONCILIATION_TERMINAL_REASON_MISMATCH",
+                    ),
+                    reservation=reservation,
+                    changed=False,
+                )
+
+            if not evidence_matches:
+                connection.commit()
+
+                return ReservationTransitionResult(
+                    status="BLOCK",
+                    reasons=(
+                        "RECONCILIATION_EVIDENCE_MISMATCH",
+                    ),
+                    reservation=reservation,
+                    changed=False,
+                )
+
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="PASS",
+                reasons=(),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if reservation.status not in (
+            SIGNED,
+            SUBMITTED,
+        ):
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_NOT_RECONCILABLE",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        if not evidence_matches:
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RECONCILIATION_EVIDENCE_MISMATCH",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
+        updated = connection.execute(
+            """
+            UPDATE live_capital_reservations
+
+            SET
+                status = ?,
+                terminal_at = ?,
+                terminal_reason = ?
+
+            WHERE reservation_id = ?
+              AND status IN (?, ?)
+              AND transaction_signature = ?
+              AND signed_transaction_sha256 = ?
+              AND last_valid_block_height = ?
+              AND blockhash_rpc_slot = ?
+            """,
+            (
+                RELEASED,
+                now,
+                RECONCILED_ABSENT_EXPIRED_REASON,
+                reservation_id,
+                SIGNED,
+                SUBMITTED,
+                transaction_signature,
+                signed_transaction_sha256,
+                last_valid_block_height,
+                blockhash_rpc_slot,
+            ),
+        )
+
+        if updated.rowcount != 1:
+            connection.rollback()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "RECONCILIATION_RELEASE_TRANSITION_FAILED",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            connection.rollback()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "RECONCILED_RESERVATION_MISSING",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        persisted = _row_to_reservation(
+            row
+        )
+
+        if (
+            persisted.status != RELEASED
+            or persisted.terminal_at is None
+            or persisted.terminal_reason
+            != RECONCILED_ABSENT_EXPIRED_REASON
+            or persisted.transaction_signature
+            != transaction_signature
+            or persisted
+            .signed_transaction_sha256
+            != signed_transaction_sha256
+            or persisted
+            .last_valid_block_height
+            != last_valid_block_height
+            or persisted.blockhash_rpc_slot
+            != blockhash_rpc_slot
+        ):
+            connection.rollback()
+
+            return ReservationTransitionResult(
+                status=UNKNOWN,
+                reasons=(
+                    "RECONCILED_RESERVATION_VERIFICATION_FAILED",
+                ),
+                reservation=None,
+                changed=False,
+            )
+
+        connection.commit()
+
+        return ReservationTransitionResult(
+            status="PASS",
+            reasons=(),
+            reservation=persisted,
             changed=True,
         )
 

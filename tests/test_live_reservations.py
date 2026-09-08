@@ -15,7 +15,9 @@ from src.portfolio.live_reservations import (
     RELEASED,
     SIGNED,
     SUBMITTED,
+    RECONCILED_ABSENT_EXPIRED_REASON,
     get_connection,
+    held_reservation_totals,
     init_schema,
     load_capital_reservation,
     load_capital_reservation_read_only,
@@ -23,6 +25,7 @@ from src.portfolio.live_reservations import (
     arm_reservation_submission,
     bind_reservation_signed_transaction,
     release_active_reservation,
+    release_reconciled_absent_expired_reservation,
     reserve_pump_buy_capital,
 )
 from src.risk.risk_governor import (
@@ -1822,6 +1825,488 @@ class LiveReservationTests(unittest.TestCase):
         self.assertIn(
             "SIGNED_RESERVATION_REQUIRES_RECONCILIATION",
             released.reasons,
+        )
+
+    def test_reconcile_absent_expired_signed_releases_and_preserves_artifact(
+        self,
+    ):
+        result = self.reserve(
+            "MintReconcileSigned"
+        )
+
+        signed = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureReconcileSigned"
+            ),
+        )
+
+        before = signed.reservation
+
+        released = (
+            release_reconciled_absent_expired_reservation(
+                reservation_id=(
+                    before.reservation_id
+                ),
+                transaction_signature=(
+                    before.transaction_signature
+                ),
+                signed_transaction_sha256=(
+                    before
+                    .signed_transaction_sha256
+                ),
+                last_valid_block_height=(
+                    before
+                    .last_valid_block_height
+                ),
+                blockhash_rpc_slot=(
+                    before.blockhash_rpc_slot
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            released.status,
+            "PASS",
+        )
+
+        self.assertTrue(
+            released.changed
+        )
+
+        self.assertEqual(
+            released.reservation.status,
+            RELEASED,
+        )
+
+        self.assertIsNotNone(
+            released.reservation.terminal_at
+        )
+
+        self.assertEqual(
+            released.reservation
+            .terminal_reason,
+            RECONCILED_ABSENT_EXPIRED_REASON,
+        )
+
+        self.assertEqual(
+            released.reservation
+            .transaction_signature,
+            before.transaction_signature,
+        )
+
+        self.assertEqual(
+            released.reservation
+            .signed_transaction_sha256,
+            before.signed_transaction_sha256,
+        )
+
+        self.assertEqual(
+            released.reservation
+            .signed_transaction_bytes,
+            before.signed_transaction_bytes,
+        )
+
+        self.assertEqual(
+            released.reservation
+            .recent_blockhash,
+            before.recent_blockhash,
+        )
+
+    def test_reconcile_absent_expired_submitted_releases_and_preserves_submission_provenance(
+        self,
+    ):
+        result = self.reserve(
+            "MintReconcileSubmitted"
+        )
+
+        signed = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureReconcileSubmitted"
+            ),
+        )
+
+        armed = arm_reservation_submission(
+            reservation_id=(
+                signed.reservation
+                .reservation_id
+            ),
+            db_path=self.db_path,
+        )
+
+        submitted = (
+            acknowledge_reservation_submitted(
+                reservation_id=(
+                    signed.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    "SignatureReconcileSubmitted"
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        before = submitted.reservation
+
+        released = (
+            release_reconciled_absent_expired_reservation(
+                reservation_id=(
+                    before.reservation_id
+                ),
+                transaction_signature=(
+                    before.transaction_signature
+                ),
+                signed_transaction_sha256=(
+                    before
+                    .signed_transaction_sha256
+                ),
+                last_valid_block_height=(
+                    before
+                    .last_valid_block_height
+                ),
+                blockhash_rpc_slot=(
+                    before.blockhash_rpc_slot
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            armed.status,
+            "PASS",
+        )
+
+        self.assertEqual(
+            released.status,
+            "PASS",
+        )
+
+        self.assertTrue(
+            released.changed
+        )
+
+        self.assertEqual(
+            released.reservation.status,
+            RELEASED,
+        )
+
+        self.assertIsNotNone(
+            released.reservation
+            .submission_started_at
+        )
+
+        self.assertEqual(
+            released.reservation
+            .submission_attempt_count,
+            1,
+        )
+
+        self.assertIsNotNone(
+            released.reservation.submitted_at
+        )
+
+        self.assertEqual(
+            released.reservation
+            .terminal_reason,
+            RECONCILED_ABSENT_EXPIRED_REASON,
+        )
+
+    def test_reconcile_absent_expired_is_idempotent_but_evidence_bound(
+        self,
+    ):
+        result = self.reserve(
+            "MintReconcileIdempotent"
+        )
+
+        signed = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureReconcileIdempotent"
+            ),
+        )
+
+        before = signed.reservation
+
+        kwargs = {
+            "reservation_id": (
+                before.reservation_id
+            ),
+            "transaction_signature": (
+                before.transaction_signature
+            ),
+            "signed_transaction_sha256": (
+                before.signed_transaction_sha256
+            ),
+            "last_valid_block_height": (
+                before.last_valid_block_height
+            ),
+            "blockhash_rpc_slot": (
+                before.blockhash_rpc_slot
+            ),
+            "db_path": self.db_path,
+        }
+
+        first = (
+            release_reconciled_absent_expired_reservation(
+                **kwargs
+            )
+        )
+
+        retry = (
+            release_reconciled_absent_expired_reservation(
+                **kwargs
+            )
+        )
+
+        mismatch = dict(kwargs)
+        mismatch[
+            "last_valid_block_height"
+        ] = (
+            before.last_valid_block_height
+            + 1
+        )
+
+        blocked = (
+            release_reconciled_absent_expired_reservation(
+                **mismatch
+            )
+        )
+
+        self.assertTrue(first.changed)
+
+        self.assertEqual(
+            retry.status,
+            "PASS",
+        )
+
+        self.assertFalse(
+            retry.changed
+        )
+
+        self.assertEqual(
+            blocked.status,
+            "BLOCK",
+        )
+
+        self.assertIn(
+            "RECONCILIATION_EVIDENCE_MISMATCH",
+            blocked.reasons,
+        )
+
+    def test_reconcile_absent_expired_rejects_active_reservation(
+        self,
+    ):
+        result = self.reserve(
+            "MintReconcileActive"
+        )
+
+        reservation = result.reservation
+
+        blocked = (
+            release_reconciled_absent_expired_reservation(
+                reservation_id=(
+                    reservation.reservation_id
+                ),
+                transaction_signature=(
+                    "NotYetSigned"
+                ),
+                signed_transaction_sha256=(
+                    "11" * 32
+                ),
+                last_valid_block_height=350,
+                blockhash_rpc_slot=200,
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            blocked.status,
+            "BLOCK",
+        )
+
+        self.assertFalse(
+            blocked.changed
+        )
+
+        self.assertIn(
+            "RESERVATION_NOT_RECONCILABLE",
+            blocked.reasons,
+        )
+
+        self.assertEqual(
+            blocked.reservation.status,
+            ACTIVE,
+        )
+
+    def test_reconcile_absent_expired_does_not_reclassify_other_release_reason(
+        self,
+    ):
+        result = self.reserve(
+            "MintReconcileOtherRelease"
+        )
+
+        reservation = result.reservation
+
+        released = release_active_reservation(
+            reservation_id=(
+                reservation.reservation_id
+            ),
+            reason="PRE_SUBMIT_ABORT",
+            db_path=self.db_path,
+        )
+
+        blocked = (
+            release_reconciled_absent_expired_reservation(
+                reservation_id=(
+                    reservation.reservation_id
+                ),
+                transaction_signature=(
+                    "NeverSigned"
+                ),
+                signed_transaction_sha256=(
+                    "22" * 32
+                ),
+                last_valid_block_height=350,
+                blockhash_rpc_slot=200,
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            released.status,
+            "PASS",
+        )
+
+        self.assertEqual(
+            blocked.status,
+            "BLOCK",
+        )
+
+        self.assertFalse(
+            blocked.changed
+        )
+
+        self.assertIn(
+            "RECONCILIATION_TERMINAL_REASON_MISMATCH",
+            blocked.reasons,
+        )
+
+        self.assertEqual(
+            blocked.reservation
+            .terminal_reason,
+            "PRE_SUBMIT_ABORT",
+        )
+
+    def test_reconcile_absent_expired_removes_held_capital(
+        self,
+    ):
+        result = self.reserve(
+            "MintReconcileHeldCapital"
+        )
+
+        signed = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureReconcileHeldCapital"
+            ),
+        )
+
+        before = signed.reservation
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            held_before = (
+                held_reservation_totals(
+                    connection
+                )
+            )
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            held_before,
+            (
+                before.spend_lamports,
+                before.wallet_cost_lamports,
+                1,
+            ),
+        )
+
+        released = (
+            release_reconciled_absent_expired_reservation(
+                reservation_id=(
+                    before.reservation_id
+                ),
+                transaction_signature=(
+                    before.transaction_signature
+                ),
+                signed_transaction_sha256=(
+                    before
+                    .signed_transaction_sha256
+                ),
+                last_valid_block_height=(
+                    before
+                    .last_valid_block_height
+                ),
+                blockhash_rpc_slot=(
+                    before.blockhash_rpc_slot
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            released.status,
+            "PASS",
+        )
+
+        self.assertTrue(
+            released.changed
+        )
+
+        self.assertEqual(
+            released.reservation.status,
+            RELEASED,
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            held_after = (
+                held_reservation_totals(
+                    connection
+                )
+            )
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            held_after,
+            (
+                0,
+                0,
+                0,
+            ),
         )
 
     def test_expired_cannot_be_signed(

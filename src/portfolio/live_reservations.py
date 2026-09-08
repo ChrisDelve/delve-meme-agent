@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import math
 import sqlite3
 import time
@@ -27,7 +29,7 @@ from src.risk.risk_governor import (
 
 DB_PATH = Path("logs/delve_live.db")
 
-RESERVATION_VERSION = "live-capital-reservation-v4"
+RESERVATION_VERSION = "live-capital-reservation-v5"
 
 ACTIVE = "ACTIVE"
 SIGNED = "SIGNED"
@@ -67,6 +69,10 @@ class LiveCapitalReservation:
 
     signed_at: float | None
     transaction_signature: str | None
+
+    signed_message_sha256: str | None = None
+    signed_transaction_sha256: str | None = None
+    signed_transaction_bytes: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +183,9 @@ def init_schema(
 
             signed_at REAL,
             transaction_signature TEXT,
+            signed_message_sha256 TEXT,
+            signed_transaction_sha256 TEXT,
+            signed_transaction_bytes BLOB,
 
             terminal_at REAL,
             terminal_reason TEXT
@@ -233,6 +242,39 @@ def init_schema(
             """
             ALTER TABLE live_capital_reservations
             ADD COLUMN transaction_signature TEXT
+            """
+        )
+
+    if (
+        "signed_message_sha256"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN signed_message_sha256 TEXT
+            """
+        )
+
+    if (
+        "signed_transaction_sha256"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN signed_transaction_sha256 TEXT
+            """
+        )
+
+    if (
+        "signed_transaction_bytes"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN signed_transaction_bytes BLOB
             """
         )
 
@@ -686,6 +728,9 @@ def reserve_pump_buy_capital(
             ),
             signed_at=None,
             transaction_signature=None,
+            signed_message_sha256=None,
+            signed_transaction_sha256=None,
+            signed_transaction_bytes=None,
         )
 
         connection.execute(
@@ -828,6 +873,27 @@ def _row_to_reservation(
                 row["transaction_signature"]
             )
         ),
+        signed_message_sha256=(
+            None
+            if row["signed_message_sha256"] is None
+            else str(
+                row["signed_message_sha256"]
+            )
+        ),
+        signed_transaction_sha256=(
+            None
+            if row["signed_transaction_sha256"] is None
+            else str(
+                row["signed_transaction_sha256"]
+            )
+        ),
+        signed_transaction_bytes=(
+            None
+            if row["signed_transaction_bytes"] is None
+            else bytes(
+                row["signed_transaction_bytes"]
+            )
+        ),
     )
 
 
@@ -905,14 +971,19 @@ def bind_reservation_signed_transaction(
     *,
     reservation_id: str,
     transaction_signature: str,
+    signed_message_sha256: str,
+    signed_transaction_bytes: bytes,
     db_path: Path = DB_PATH,
 ) -> ReservationTransitionResult:
     """
     Atomically bind an ACTIVE reservation to a
     signed transaction BEFORE network submission.
 
-    Repeating the same transition with the same
-    signature is idempotent.
+    Repeating the same transition with the exact
+    same signed artifact is idempotent.
+
+    SIGNED means the exact transaction required for
+    crash recovery has been durably persisted.
 
     SIGNED reservations remain held and are not
     automatically expired by reservation TTL.
@@ -942,6 +1013,65 @@ def bind_reservation_signed_transaction(
             reservation=None,
             changed=False,
         )
+
+    if not isinstance(
+        signed_message_sha256,
+        str,
+    ):
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_SIGNED_MESSAGE_SHA256",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    signed_message_sha256 = (
+        signed_message_sha256
+        .strip()
+        .lower()
+    )
+
+    if (
+        len(signed_message_sha256) != 64
+        or any(
+            character
+            not in "0123456789abcdef"
+            for character
+            in signed_message_sha256
+        )
+    ):
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_SIGNED_MESSAGE_SHA256",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    if (
+        not isinstance(
+            signed_transaction_bytes,
+            bytes,
+        )
+        or not signed_transaction_bytes
+    ):
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_SIGNED_TRANSACTION_BYTES",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    signed_transaction_sha256 = (
+        hashlib.sha256(
+            signed_transaction_bytes
+        ).hexdigest()
+    )
 
     now = time.time()
     connection = get_connection(db_path)
@@ -985,6 +1115,21 @@ def bind_reservation_signed_transaction(
             row
         )
 
+        if (
+            reservation.reservation_version
+            != RESERVATION_VERSION
+        ):
+            connection.commit()
+
+            return ReservationTransitionResult(
+                status="BLOCK",
+                reasons=(
+                    "RESERVATION_VERSION_MISMATCH",
+                ),
+                reservation=reservation,
+                changed=False,
+            )
+
         signature_owner = connection.execute(
             """
             SELECT reservation_id
@@ -1025,15 +1170,36 @@ def bind_reservation_signed_transaction(
                 reservation.transaction_signature
                 == transaction_signature
             ):
+                if (
+                    reservation.signed_message_sha256
+                    == signed_message_sha256
+                    and
+                    reservation.signed_transaction_sha256
+                    == signed_transaction_sha256
+                    and
+                    reservation.signed_transaction_bytes
+                    == signed_transaction_bytes
+                ):
+                    connection.commit()
+
+                    return (
+                        ReservationTransitionResult(
+                            status="PASS",
+                            reasons=(),
+                            reservation=reservation,
+                            changed=False,
+                        )
+                    )
+
                 connection.commit()
 
-                return (
-                    ReservationTransitionResult(
-                        status="PASS",
-                        reasons=(),
-                        reservation=reservation,
-                        changed=False,
-                    )
+                return ReservationTransitionResult(
+                    status="BLOCK",
+                    reasons=(
+                        "SIGNED_TRANSACTION_ARTIFACT_MISMATCH",
+                    ),
+                    reservation=reservation,
+                    changed=False,
                 )
 
             connection.commit()
@@ -1066,7 +1232,10 @@ def bind_reservation_signed_transaction(
             SET
                 status = ?,
                 signed_at = ?,
-                transaction_signature = ?
+                transaction_signature = ?,
+                signed_message_sha256 = ?,
+                signed_transaction_sha256 = ?,
+                signed_transaction_bytes = ?
 
             WHERE reservation_id = ?
               AND status = ?
@@ -1075,6 +1244,9 @@ def bind_reservation_signed_transaction(
                 SIGNED,
                 now,
                 transaction_signature,
+                signed_message_sha256,
+                signed_transaction_sha256,
+                signed_transaction_bytes,
                 reservation_id,
                 ACTIVE,
             ),

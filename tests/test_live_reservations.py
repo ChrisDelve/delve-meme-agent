@@ -81,6 +81,45 @@ class LiveReservationTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def bind_signed(
+        self,
+        *,
+        reservation_id: str,
+        transaction_signature: str,
+        db_path=None,
+        signed_message_sha256: str | None = None,
+        signed_transaction_bytes: bytes | None = None,
+    ):
+        if db_path is None:
+            db_path = self.db_path
+
+        if signed_message_sha256 is None:
+            signed_message_sha256 = (
+                "11" * 32
+            )
+
+        if signed_transaction_bytes is None:
+            signed_transaction_bytes = (
+                "signed-transaction:"
+                f"{transaction_signature}"
+            ).encode(
+                "utf-8"
+            )
+
+        return bind_reservation_signed_transaction(
+            reservation_id=reservation_id,
+            transaction_signature=(
+                transaction_signature
+            ),
+            signed_message_sha256=(
+                signed_message_sha256
+            ),
+            signed_transaction_bytes=(
+                signed_transaction_bytes
+            ),
+            db_path=db_path,
+        )
+
     def reserve(
         self,
         mint: str,
@@ -510,7 +549,7 @@ class LiveReservationTests(unittest.TestCase):
             "PASS",
         )
 
-        signed = bind_reservation_signed_transaction(
+        signed = self.bind_signed(
             reservation_id=(
                 first.reservation
                 .reservation_id
@@ -837,7 +876,7 @@ class LiveReservationTests(unittest.TestCase):
             "PASS",
         )
 
-        first = bind_reservation_signed_transaction(
+        first = self.bind_signed(
             reservation_id=(
                 result.reservation
                 .reservation_id
@@ -870,7 +909,32 @@ class LiveReservationTests(unittest.TestCase):
             first.reservation.signed_at
         )
 
-        retry = bind_reservation_signed_transaction(
+        self.assertEqual(
+            first.reservation
+            .signed_message_sha256,
+            "11" * 32,
+        )
+
+        self.assertEqual(
+            first.reservation
+            .signed_transaction_bytes,
+            b"signed-transaction:SignatureA",
+        )
+
+        self.assertIsNotNone(
+            first.reservation
+            .signed_transaction_sha256
+        )
+
+        self.assertEqual(
+            len(
+                first.reservation
+                .signed_transaction_sha256
+            ),
+            64,
+        )
+
+        retry = self.bind_signed(
             reservation_id=(
                 result.reservation
                 .reservation_id
@@ -902,7 +966,7 @@ class LiveReservationTests(unittest.TestCase):
         )
 
         submitted = (
-            bind_reservation_signed_transaction(
+            self.bind_signed(
                 reservation_id=(
                     result.reservation
                     .reservation_id
@@ -919,7 +983,7 @@ class LiveReservationTests(unittest.TestCase):
             "PASS",
         )
 
-        retry = bind_reservation_signed_transaction(
+        retry = self.bind_signed(
             reservation_id=(
                 result.reservation
                 .reservation_id
@@ -966,7 +1030,7 @@ class LiveReservationTests(unittest.TestCase):
         )
 
         first_submit = (
-            bind_reservation_signed_transaction(
+            self.bind_signed(
                 reservation_id=(
                     first.reservation
                     .reservation_id
@@ -984,7 +1048,7 @@ class LiveReservationTests(unittest.TestCase):
         )
 
         second_submit = (
-            bind_reservation_signed_transaction(
+            self.bind_signed(
                 reservation_id=(
                     second.reservation
                     .reservation_id
@@ -1085,7 +1149,7 @@ class LiveReservationTests(unittest.TestCase):
         )
 
         submitted = (
-            bind_reservation_signed_transaction(
+            self.bind_signed(
                 reservation_id=(
                     result.reservation
                     .reservation_id
@@ -1162,7 +1226,7 @@ class LiveReservationTests(unittest.TestCase):
             connection.close()
 
         submitted = (
-            bind_reservation_signed_transaction(
+            self.bind_signed(
                 reservation_id=(
                     result.reservation
                     .reservation_id
@@ -1191,6 +1255,150 @@ class LiveReservationTests(unittest.TestCase):
         self.assertIn(
             "RESERVATION_NOT_ACTIVE",
             submitted.reasons,
+        )
+
+
+    def test_signed_artifact_mismatch_blocks(
+        self,
+    ):
+        result = self.reserve(
+            "MintSignedArtifactMismatch"
+        )
+
+        first = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureArtifact"
+            ),
+        )
+
+        self.assertEqual(
+            first.status,
+            "PASS",
+        )
+
+        retry = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureArtifact"
+            ),
+            signed_transaction_bytes=(
+                b"different-signed-transaction"
+            ),
+        )
+
+        self.assertEqual(
+            retry.status,
+            "BLOCK",
+        )
+
+        self.assertFalse(
+            retry.changed
+        )
+
+        self.assertIn(
+            "SIGNED_TRANSACTION_ARTIFACT_MISMATCH",
+            retry.reasons,
+        )
+
+    def test_invalid_signed_message_hash_fails_closed(
+        self,
+    ):
+        result = self.reserve(
+            "MintInvalidSignedMessageHash"
+        )
+
+        transition = (
+            bind_reservation_signed_transaction(
+                reservation_id=(
+                    result.reservation
+                    .reservation_id
+                ),
+                transaction_signature=(
+                    "SignatureInvalidHash"
+                ),
+                signed_message_sha256=(
+                    "not-a-sha256"
+                ),
+                signed_transaction_bytes=(
+                    b"signed-transaction"
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            transition.status,
+            "UNKNOWN",
+        )
+
+        self.assertFalse(
+            transition.changed
+        )
+
+        self.assertIn(
+            "INVALID_SIGNED_MESSAGE_SHA256",
+            transition.reasons,
+        )
+
+    def test_old_reservation_version_cannot_bind_signed_artifact(
+        self,
+    ):
+        result = self.reserve(
+            "MintOldReservationContract"
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_capital_reservations
+                SET reservation_version = ?
+                WHERE reservation_id = ?
+                """,
+                (
+                    "live-capital-reservation-v4",
+                    result.reservation
+                    .reservation_id,
+                ),
+            )
+
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        transition = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureOldContract"
+            ),
+        )
+
+        self.assertEqual(
+            transition.status,
+            "BLOCK",
+        )
+
+        self.assertFalse(
+            transition.changed
+        )
+
+        self.assertIn(
+            "RESERVATION_VERSION_MISMATCH",
+            transition.reasons,
         )
 
 

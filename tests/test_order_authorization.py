@@ -729,6 +729,12 @@ class OrderAuthorizationTests(
                 transaction_signature=(
                     "SignedTransactionA"
                 ),
+                signed_message_sha256=(
+                    "22" * 32
+                ),
+                signed_transaction_bytes=(
+                    b"signed-order-authorization-test"
+                ),
                 db_path=self.db_path,
             )
         )

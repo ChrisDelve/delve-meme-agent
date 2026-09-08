@@ -878,6 +878,21 @@ class SuccessfulPumpBuyFillTests(
         )
 
         self.assertEqual(
+            result.wallet_pre_balance_lamports,
+            self.payer_pre,
+        )
+
+        self.assertEqual(
+            result.wallet_post_balance_lamports,
+            self.payer_post,
+        )
+
+        self.assertEqual(
+            result.wallet_balance_delta_lamports,
+            self.payer_delta,
+        )
+
+        self.assertEqual(
             result.wallet_cost_lamports,
             1_100_000,
         )

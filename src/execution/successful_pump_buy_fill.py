@@ -93,6 +93,8 @@ class SuccessfulPumpBuyFillResult:
     token_delta: int | None
 
     fee_lamports: int | None
+    wallet_pre_balance_lamports: int | None
+    wallet_post_balance_lamports: int | None
     wallet_balance_delta_lamports: int | None
     wallet_cost_lamports: int | None
 
@@ -1314,6 +1316,14 @@ async def resolve_successful_pump_buy_fill(
 
     fee_lamports: int | None = None
 
+    wallet_pre_balance_lamports: (
+        int | None
+    ) = None
+
+    wallet_post_balance_lamports: (
+        int | None
+    ) = None
+
     wallet_balance_delta_lamports: (
         int | None
     ) = None
@@ -1407,6 +1417,12 @@ async def resolve_successful_pump_buy_fill(
             ),
             token_delta=token_delta,
             fee_lamports=fee_lamports,
+            wallet_pre_balance_lamports=(
+                wallet_pre_balance_lamports
+            ),
+            wallet_post_balance_lamports=(
+                wallet_post_balance_lamports
+            ),
             wallet_balance_delta_lamports=(
                 wallet_balance_delta_lamports
             ),
@@ -1669,6 +1685,16 @@ async def resolve_successful_pump_buy_fill(
 
     fee_lamports = (
         receipt.fee_lamports
+    )
+
+    wallet_pre_balance_lamports = (
+        receipt
+        .fee_payer_pre_balance_lamports
+    )
+
+    wallet_post_balance_lamports = (
+        receipt
+        .fee_payer_post_balance_lamports
     )
 
     wallet_balance_delta_lamports = (

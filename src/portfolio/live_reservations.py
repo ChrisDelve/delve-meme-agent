@@ -27,7 +27,7 @@ from src.risk.risk_governor import (
 
 DB_PATH = Path("logs/delve_live.db")
 
-RESERVATION_VERSION = "live-capital-reservation-v3"
+RESERVATION_VERSION = "live-capital-reservation-v4"
 
 ACTIVE = "ACTIVE"
 SIGNED = "SIGNED"
@@ -593,12 +593,21 @@ def reserve_pump_buy_capital(
             risk.recommended_spend_lamports
         )
 
-        wallet_cost_lamports = int(
+        transaction_overhead_lamports = int(
             risk.recommended_simulation
-            .total_wallet_cost_lamports
+            .total_transaction_overhead_lamports
         )
 
-        if wallet_cost_lamports <= 0:
+        wallet_cost_lamports = (
+            spend_lamports
+            + transaction_overhead_lamports
+        )
+
+        if (
+            spend_lamports <= 0
+            or transaction_overhead_lamports < 0
+            or wallet_cost_lamports <= 0
+        ):
             connection.rollback()
 
             return ReservationDecision(

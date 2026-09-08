@@ -486,7 +486,7 @@ class OrderAuthorizationTests(
 
         self.assertEqual(
             result.authorization_version,
-            "order-authorization-v4",
+            "order-authorization-v5",
         )
 
         self.assertEqual(
@@ -876,7 +876,7 @@ class OrderAuthorizationTests(
         )
 
         self.assertIn(
-            "SIMULATION_WALLET_COST_MISMATCH",
+            "RESERVATION_WALLET_LIABILITY_MISMATCH",
             result.reasons,
         )
 

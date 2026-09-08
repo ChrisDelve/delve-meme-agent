@@ -193,11 +193,33 @@ class LiveReservationTests(unittest.TestCase):
             0,
         )
 
-        self.assertEqual(
-            result.reservation.wallet_cost_lamports,
+        simulation = (
             result.risk_result
             .recommended_simulation
-            .total_wallet_cost_lamports,
+        )
+
+        self.assertEqual(
+            result.reservation.wallet_cost_lamports,
+            (
+                result.reservation.spend_lamports
+                + simulation
+                .total_transaction_overhead_lamports
+            ),
+        )
+
+        self.assertGreaterEqual(
+            result.reservation.wallet_cost_lamports,
+            simulation.total_wallet_cost_lamports,
+        )
+
+        self.assertEqual(
+            (
+                result.reservation
+                .wallet_cost_lamports
+                - simulation
+                .total_wallet_cost_lamports
+            ),
+            simulation.unused_pump_budget,
         )
 
     def test_second_reservation_sees_first_exposure(

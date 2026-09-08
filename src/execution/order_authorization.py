@@ -29,7 +29,7 @@ from src.safety.token_safety_gate import (
 )
 
 
-AUTHORIZATION_VERSION = "order-authorization-v4"
+AUTHORIZATION_VERSION = "order-authorization-v5"
 
 AUTHORIZE = "AUTHORIZE"
 DENY = "DENY"
@@ -755,13 +755,18 @@ def authorize_pump_buy(
                 "SIMULATION_SPEND_MISMATCH"
             )
 
+        maximum_wallet_liability = (
+            simulation.spendable_quote_in
+            + simulation.total_transaction_overhead_lamports
+        )
+
         if (
             reservation is not None
-            and simulation.total_wallet_cost_lamports
+            and maximum_wallet_liability
             != reservation.wallet_cost_lamports
         ):
             reasons.append(
-                "SIMULATION_WALLET_COST_MISMATCH"
+                "RESERVATION_WALLET_LIABILITY_MISMATCH"
             )
 
         curve = live_curve.curve

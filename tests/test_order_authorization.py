@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import time
 import unittest
 
+from solders.pubkey import Pubkey
+
 from src.execution.live_curve_state import (
     LivePumpCurveState,
 )
@@ -27,10 +29,18 @@ from src.risk.risk_governor import (
     AccountRiskState,
     RiskPolicy,
 )
+from src.safety.token_safety_gate import (
+    SOL_QUOTE_MINT,
+)
+from src.safety.token_safety_resolver import (
+    TOKEN_PROGRAM,
+    derive_associated_token_account,
+    derive_bonding_curve,
+)
 
 
-MINT = (
-    "TestMint111111111111111111111111111111111"
+MINT = str(
+    Pubkey.new_unique()
 )
 
 
@@ -39,6 +49,36 @@ class OrderAuthorizationTests(
 ):
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
+
+        self.wallet_pubkey = str(
+            Pubkey.new_unique()
+        )
+
+        self.mint_pubkey = (
+            Pubkey.from_string(
+                MINT
+            )
+        )
+
+        self.creator_pubkey = (
+            Pubkey.new_unique()
+        )
+
+        self.bonding_curve_pubkey = (
+            derive_bonding_curve(
+                self.mint_pubkey
+            )
+        )
+
+        self.associated_bonding_curve = (
+            derive_associated_token_account(
+                owner=(
+                    self.bonding_curve_pubkey
+                ),
+                mint=self.mint_pubkey,
+                token_program=TOKEN_PROGRAM,
+            )
+        )
 
         self.db_path = (
             Path(self.temp_dir.name)
@@ -88,6 +128,7 @@ class OrderAuthorizationTests(
     ):
         decision = reserve_pump_buy_capital(
             mint=MINT,
+            wallet_pubkey=self.wallet_pubkey,
             available_cash_lamports=(
                 100_000_000
             ),
@@ -138,6 +179,22 @@ class OrderAuthorizationTests(
             snapshot=SimpleNamespace(
                 mint=MINT,
                 rpc_max_slot=100,
+                token_program=str(
+                    TOKEN_PROGRAM
+                ),
+                associated_bonding_curve=str(
+                    self.associated_bonding_curve
+                ),
+                bonding_curve=SimpleNamespace(
+                    address=str(
+                        self.bonding_curve_pubkey
+                    ),
+                    creator=str(
+                        self.creator_pubkey
+                    ),
+                    is_mayhem_mode=False,
+                    quote_mint=SOL_QUOTE_MINT,
+                ),
             ),
         )
 
@@ -154,6 +211,14 @@ class OrderAuthorizationTests(
         live_curve = LivePumpCurveState(
             mint=MINT,
             curve=SimpleNamespace(
+                address=str(
+                    self.bonding_curve_pubkey
+                ),
+                creator=str(
+                    self.creator_pubkey
+                ),
+                is_mayhem_mode=False,
+                quote_mint=SOL_QUOTE_MINT,
                 virtual_quote_reserves=(
                     self.curve_state
                     .virtual_quote_reserves
@@ -296,6 +361,147 @@ class OrderAuthorizationTests(
 
         self.assertTrue(
             result.is_valid()
+        )
+
+    def test_active_authorization_binds_transaction_contract(
+        self,
+    ):
+        (
+            reservation,
+            safety,
+            execution,
+            live_curve,
+        ) = self.make_context()
+
+        result = self.authorize(
+            reservation=reservation,
+            safety=safety,
+            execution=execution,
+            live_curve=live_curve,
+        )
+
+        self.assertEqual(
+            result.status,
+            AUTHORIZE,
+        )
+
+        self.assertEqual(
+            result.authorization_version,
+            "order-authorization-v3",
+        )
+
+        self.assertEqual(
+            result.wallet_pubkey,
+            reservation.wallet_pubkey,
+        )
+
+        self.assertEqual(
+            result.bonding_curve,
+            str(self.bonding_curve_pubkey),
+        )
+
+        self.assertEqual(
+            result.associated_bonding_curve,
+            str(
+                self.associated_bonding_curve
+            ),
+        )
+
+        self.assertEqual(
+            result.base_token_program,
+            str(TOKEN_PROGRAM),
+        )
+
+        self.assertEqual(
+            result.creator,
+            str(self.creator_pubkey),
+        )
+
+        self.assertFalse(
+            result.mayhem_mode
+        )
+
+        self.assertEqual(
+            result.quote_mint_for_instruction,
+            (
+                "So11111111111111111111111111111111111111112"
+            ),
+        )
+
+        self.assertEqual(
+            result.token_amount,
+            execution.simulation.tokens_out,
+        )
+
+        self.assertEqual(
+            result.max_sol_cost,
+            execution.simulation.spendable_quote_in,
+        )
+
+    def test_non_sol_quote_mint_denies(
+        self,
+    ):
+        (
+            reservation,
+            safety,
+            execution,
+            live_curve,
+        ) = self.make_context()
+
+        safety.snapshot.bonding_curve.quote_mint = (
+            str(
+                Pubkey.new_unique()
+            )
+        )
+
+        result = self.authorize(
+            reservation=reservation,
+            safety=safety,
+            execution=execution,
+            live_curve=live_curve,
+        )
+
+        self.assertEqual(
+            result.status,
+            DENY,
+        )
+
+        self.assertIn(
+            "NON_SOL_AUTHORIZATION_QUOTE_MINT",
+            result.reasons,
+        )
+
+    def test_safety_live_creator_mismatch_denies(
+        self,
+    ):
+        (
+            reservation,
+            safety,
+            execution,
+            live_curve,
+        ) = self.make_context()
+
+        safety.snapshot.bonding_curve.creator = (
+            str(
+                Pubkey.new_unique()
+            )
+        )
+
+        result = self.authorize(
+            reservation=reservation,
+            safety=safety,
+            execution=execution,
+            live_curve=live_curve,
+        )
+
+        self.assertEqual(
+            result.status,
+            DENY,
+        )
+
+        self.assertIn(
+            "SAFETY_LIVE_CURVE_CREATOR_MISMATCH",
+            result.reasons,
         )
 
     def test_missing_reservation_denies(self):

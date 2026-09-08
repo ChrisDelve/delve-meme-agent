@@ -7,6 +7,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from solders.pubkey import Pubkey
+
 from src.execution.simulation_fingerprint import (
     simulation_fingerprint,
 )
@@ -25,7 +27,7 @@ from src.risk.risk_governor import (
 
 DB_PATH = Path("logs/delve_live.db")
 
-RESERVATION_VERSION = "live-capital-reservation-v2"
+RESERVATION_VERSION = "live-capital-reservation-v3"
 
 ACTIVE = "ACTIVE"
 SIGNED = "SIGNED"
@@ -43,6 +45,7 @@ class LiveCapitalReservation:
 
     mint: str
     side: str
+    wallet_pubkey: str
 
     spend_lamports: int
     wallet_cost_lamports: int
@@ -137,6 +140,7 @@ def init_schema(
 
             mint TEXT NOT NULL,
             side TEXT NOT NULL,
+            wallet_pubkey TEXT NOT NULL,
 
             spend_lamports INTEGER NOT NULL
                 CHECK (spend_lamports > 0),
@@ -190,6 +194,17 @@ def init_schema(
             """
         ).fetchall()
     }
+
+    if (
+        "wallet_pubkey"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN wallet_pubkey TEXT
+            """
+        )
 
     if (
         "risk_simulation_sha256"
@@ -337,6 +352,7 @@ def held_reservation_totals(
 def reserve_pump_buy_capital(
     *,
     mint: str,
+    wallet_pubkey: str,
     available_cash_lamports: int,
     account: AccountRiskState,
     curve_state: PumpCurveState,
@@ -372,6 +388,43 @@ def reserve_pump_buy_capital(
             reservation=None,
             risk_result=None,
         )
+
+    wallet_pubkey = wallet_pubkey.strip()
+
+    if not wallet_pubkey:
+        return ReservationDecision(
+            status=UNKNOWN,
+            reasons=("INVALID_WALLET_PUBKEY",),
+            reservation=None,
+            risk_result=None,
+        )
+
+    try:
+        parsed_wallet_pubkey = (
+            Pubkey.from_string(
+                wallet_pubkey
+            )
+        )
+
+    except Exception:
+        return ReservationDecision(
+            status=UNKNOWN,
+            reasons=("INVALID_WALLET_PUBKEY",),
+            reservation=None,
+            risk_result=None,
+        )
+
+    if parsed_wallet_pubkey == Pubkey.default():
+        return ReservationDecision(
+            status=UNKNOWN,
+            reasons=("INVALID_WALLET_PUBKEY",),
+            reservation=None,
+            risk_result=None,
+        )
+
+    wallet_pubkey = str(
+        parsed_wallet_pubkey
+    )
 
     if available_cash_lamports < 0:
         return ReservationDecision(
@@ -587,6 +640,7 @@ def reserve_pump_buy_capital(
             ),
             mint=mint,
             side=BUY,
+            wallet_pubkey=wallet_pubkey,
             spend_lamports=spend_lamports,
             wallet_cost_lamports=(
                 wallet_cost_lamports
@@ -632,6 +686,7 @@ def reserve_pump_buy_capital(
                 reservation_version,
                 mint,
                 side,
+                wallet_pubkey,
                 spend_lamports,
                 wallet_cost_lamports,
                 status,
@@ -647,7 +702,7 @@ def reserve_pump_buy_capital(
                 expires_at
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
@@ -656,6 +711,7 @@ def reserve_pump_buy_capital(
                 reservation.reservation_version,
                 reservation.mint,
                 reservation.side,
+                reservation.wallet_pubkey,
                 reservation.spend_lamports,
                 reservation.wallet_cost_lamports,
                 reservation.status,
@@ -701,6 +757,11 @@ def _row_to_reservation(
         ),
         mint=str(row["mint"]),
         side=str(row["side"]),
+        wallet_pubkey=(
+            ""
+            if row["wallet_pubkey"] is None
+            else str(row["wallet_pubkey"])
+        ),
         spend_lamports=int(
             row["spend_lamports"]
         ),

@@ -3,6 +3,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from solders.pubkey import Pubkey
+
 from src.execution.pump_execution_simulator import (
     PumpCurveState,
 )
@@ -27,6 +29,10 @@ from src.risk.risk_governor import (
 class LiveReservationTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
+
+        self.wallet_pubkey = str(
+            Pubkey.new_unique()
+        )
 
         self.db_path = (
             Path(self.temp_dir.name)
@@ -84,6 +90,7 @@ class LiveReservationTests(unittest.TestCase):
     ):
         return reserve_pump_buy_capital(
             mint=mint,
+            wallet_pubkey=self.wallet_pubkey,
             available_cash_lamports=(
                 available_cash
             ),
@@ -98,6 +105,44 @@ class LiveReservationTests(unittest.TestCase):
             reservation_ttl_seconds=ttl,
             policy=self.policy,
             db_path=self.db_path,
+        )
+
+    def test_invalid_wallet_pubkey_fails_closed(
+        self,
+    ):
+        result = reserve_pump_buy_capital(
+            mint="MintA",
+            wallet_pubkey=(
+                "not-a-solana-pubkey"
+            ),
+            available_cash_lamports=(
+                100_000_000
+            ),
+            account=self.account,
+            curve_state=self.curve,
+            protocol_fee_bps=0,
+            creator_fee_bps=0,
+            slippage_bps=0,
+            base_network_fee_lamports=0,
+            priority_fee_lamports=0,
+            rent_lamports=0,
+            reservation_ttl_seconds=60.0,
+            policy=self.policy,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            result.status,
+            "UNKNOWN",
+        )
+
+        self.assertEqual(
+            result.reasons,
+            ("INVALID_WALLET_PUBKEY",),
+        )
+
+        self.assertIsNone(
+            result.reservation
         )
 
     def test_first_reservation_succeeds(self):
@@ -116,6 +161,11 @@ class LiveReservationTests(unittest.TestCase):
 
         self.assertIsNotNone(
             result.risk_result
+        )
+
+        self.assertEqual(
+            result.reservation.wallet_pubkey,
+            self.wallet_pubkey,
         )
 
         self.assertEqual(

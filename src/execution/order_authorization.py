@@ -24,16 +24,23 @@ from src.portfolio.live_reservations import (
     load_capital_reservation,
 )
 from src.safety.token_safety_gate import (
+    SOL_QUOTE_MINT,
     TokenSafetyGateResult,
 )
 
 
-AUTHORIZATION_VERSION = "order-authorization-v2"
+AUTHORIZATION_VERSION = "order-authorization-v3"
 
 AUTHORIZE = "AUTHORIZE"
 DENY = "DENY"
 
 BUY = "BUY"
+
+WRAPPED_SOL_MINT = (
+    "So11111111111111111111111111111111111111112"
+)
+
+U64_MAX = (1 << 64) - 1
 
 
 @dataclass(frozen=True)
@@ -55,6 +62,20 @@ class OrderAuthorization:
 
     mint: str
     side: str
+
+    wallet_pubkey: str | None
+
+    bonding_curve: str | None
+    associated_bonding_curve: str | None
+    base_token_program: str | None
+
+    creator: str | None
+    mayhem_mode: bool | None
+
+    quote_mint_for_instruction: str | None
+
+    token_amount: int | None
+    max_sol_cost: int | None
 
     spend_lamports: int
     wallet_cost_lamports: int | None
@@ -231,6 +252,11 @@ def authorize_pump_buy(
                 "RESERVATION_VERSION_MISMATCH"
             )
 
+        if not reservation.wallet_pubkey:
+            reasons.append(
+                "RESERVATION_WALLET_MISSING"
+            )
+
         if reservation.status != ACTIVE:
             reasons.append(
                 "RESERVATION_NOT_ACTIVE"
@@ -281,6 +307,23 @@ def authorize_pump_buy(
                 "RESERVATION_ALREADY_BOUND"
             )
 
+    wallet_pubkey = (
+        None
+        if reservation is None
+        else reservation.wallet_pubkey
+    )
+
+    bonding_curve: str | None = None
+    associated_bonding_curve: str | None = None
+    base_token_program: str | None = None
+
+    creator: str | None = None
+    mayhem_mode: bool | None = None
+
+    quote_mint_for_instruction: (
+        str | None
+    ) = None
+
     #
     # Safety authority.
     #
@@ -312,6 +355,176 @@ def authorize_pump_buy(
             reasons.append(
                 "CURVE_STATE_PREDATES_SAFETY"
             )
+
+        snapshot_curve = getattr(
+            safety.snapshot,
+            "bonding_curve",
+            None,
+        )
+
+        associated_bonding_curve = getattr(
+            safety.snapshot,
+            "associated_bonding_curve",
+            None,
+        )
+
+        base_token_program = getattr(
+            safety.snapshot,
+            "token_program",
+            None,
+        )
+
+        if not associated_bonding_curve:
+            reasons.append(
+                "ASSOCIATED_BONDING_CURVE_MISSING"
+            )
+
+        if not base_token_program:
+            reasons.append(
+                "BASE_TOKEN_PROGRAM_MISSING"
+            )
+
+        if snapshot_curve is None:
+            reasons.append(
+                "SAFETY_BONDING_CURVE_MISSING"
+            )
+
+        else:
+            safety_curve_address = getattr(
+                snapshot_curve,
+                "address",
+                None,
+            )
+
+            live_curve_address = getattr(
+                live_curve.curve,
+                "address",
+                None,
+            )
+
+            if not safety_curve_address:
+                reasons.append(
+                    "SAFETY_BONDING_CURVE_ADDRESS_MISSING"
+                )
+
+            if not live_curve_address:
+                reasons.append(
+                    "LIVE_BONDING_CURVE_ADDRESS_MISSING"
+                )
+
+            if (
+                safety_curve_address
+                and live_curve_address
+                and safety_curve_address
+                != live_curve_address
+            ):
+                reasons.append(
+                    "SAFETY_LIVE_CURVE_ADDRESS_MISMATCH"
+                )
+
+            if (
+                safety_curve_address
+                and live_curve_address
+                and safety_curve_address
+                == live_curve_address
+            ):
+                bonding_curve = str(
+                    live_curve_address
+                )
+
+            safety_creator = getattr(
+                snapshot_curve,
+                "creator",
+                None,
+            )
+
+            live_creator = getattr(
+                live_curve.curve,
+                "creator",
+                None,
+            )
+
+            if not live_creator:
+                reasons.append(
+                    "LIVE_CURVE_CREATOR_MISSING"
+                )
+
+            if safety_creator != live_creator:
+                reasons.append(
+                    "SAFETY_LIVE_CURVE_CREATOR_MISMATCH"
+                )
+
+            if live_creator:
+                creator = str(
+                    live_creator
+                )
+
+            safety_mayhem = getattr(
+                snapshot_curve,
+                "is_mayhem_mode",
+                None,
+            )
+
+            live_mayhem = getattr(
+                live_curve.curve,
+                "is_mayhem_mode",
+                None,
+            )
+
+            if (
+                not isinstance(
+                    safety_mayhem,
+                    bool,
+                )
+                or not isinstance(
+                    live_mayhem,
+                    bool,
+                )
+            ):
+                reasons.append(
+                    "INVALID_MAYHEM_MODE"
+                )
+
+            elif safety_mayhem != live_mayhem:
+                reasons.append(
+                    "SAFETY_LIVE_CURVE_MAYHEM_MISMATCH"
+                )
+
+            else:
+                mayhem_mode = live_mayhem
+
+            safety_quote_mint = getattr(
+                snapshot_curve,
+                "quote_mint",
+                None,
+            )
+
+            live_quote_mint = getattr(
+                live_curve.curve,
+                "quote_mint",
+                None,
+            )
+
+            if (
+                safety_quote_mint
+                not in (
+                    None,
+                    SOL_QUOTE_MINT,
+                )
+                or live_quote_mint
+                not in (
+                    None,
+                    SOL_QUOTE_MINT,
+                )
+            ):
+                reasons.append(
+                    "NON_SOL_AUTHORIZATION_QUOTE_MINT"
+                )
+
+            else:
+                quote_mint_for_instruction = (
+                    WRAPPED_SOL_MINT
+                )
 
     #
     # Execution-quality authority.
@@ -347,11 +560,64 @@ def authorize_pump_buy(
     #
     simulation_sha256: str | None = None
 
+    token_amount: int | None = None
+    max_sol_cost: int | None = None
+
     if simulation is not None:
         if not simulation.executable:
             reasons.append(
                 "SIMULATION_NOT_EXECUTABLE"
             )
+
+        raw_token_amount = getattr(
+            simulation,
+            "tokens_out",
+            None,
+        )
+
+        if (
+            not isinstance(
+                raw_token_amount,
+                int,
+            )
+            or isinstance(
+                raw_token_amount,
+                bool,
+            )
+            or raw_token_amount <= 0
+            or raw_token_amount > U64_MAX
+        ):
+            reasons.append(
+                "AUTHORIZED_TOKEN_AMOUNT_OUT_OF_RANGE"
+            )
+
+        else:
+            token_amount = raw_token_amount
+
+        raw_max_sol_cost = getattr(
+            simulation,
+            "spendable_quote_in",
+            None,
+        )
+
+        if (
+            not isinstance(
+                raw_max_sol_cost,
+                int,
+            )
+            or isinstance(
+                raw_max_sol_cost,
+                bool,
+            )
+            or raw_max_sol_cost <= 0
+            or raw_max_sol_cost > U64_MAX
+        ):
+            reasons.append(
+                "MAX_SOL_COST_OUT_OF_RANGE"
+            )
+
+        else:
+            max_sol_cost = raw_max_sol_cost
 
         if (
             simulation.spendable_quote_in
@@ -451,6 +717,21 @@ def authorize_pump_buy(
         ),
         mint=mint,
         side=BUY,
+        wallet_pubkey=wallet_pubkey,
+        bonding_curve=bonding_curve,
+        associated_bonding_curve=(
+            associated_bonding_curve
+        ),
+        base_token_program=(
+            base_token_program
+        ),
+        creator=creator,
+        mayhem_mode=mayhem_mode,
+        quote_mint_for_instruction=(
+            quote_mint_for_instruction
+        ),
+        token_amount=token_amount,
+        max_sol_cost=max_sol_cost,
         spend_lamports=(
             requested_spend_lamports
         ),

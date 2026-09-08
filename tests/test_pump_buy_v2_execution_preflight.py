@@ -202,6 +202,18 @@ class PumpBuyV2ExecutionPreflightTests(
                     self.message_plan
                     .message_sha256
                 ),
+                blockhash_context_version=(
+                    self.message_plan
+                    .blockhash_context_version
+                ),
+                last_valid_block_height=(
+                    self.message_plan
+                    .last_valid_block_height
+                ),
+                blockhash_rpc_slot=(
+                    self.message_plan
+                    .blockhash_rpc_slot
+                ),
                 payer=(
                     self.authorization
                     .wallet_pubkey
@@ -300,6 +312,45 @@ class PumpBuyV2ExecutionPreflightTests(
         return (
             result,
             rpc,
+        )
+
+    async def test_expiry_binding_mismatch_denies(
+        self,
+    ):
+        from dataclasses import replace
+
+        network_validation = replace(
+            self.network_validation,
+            last_valid_block_height=(
+                self.message_plan
+                .last_valid_block_height
+                + 1
+            ),
+        )
+
+        result, rpc = await self.preflight(
+            network_validation=(
+                network_validation
+            ),
+        )
+
+        self.assertEqual(
+            result.status,
+            "DENY",
+        )
+
+        self.assertIn(
+            "BLOCKHASH_EXPIRY_BINDING_MISMATCH",
+            result.reasons,
+        )
+
+        self.assertFalse(
+            result.allows_signing
+        )
+
+        self.assertEqual(
+            rpc.calls,
+            [],
         )
 
     async def test_valid_simulation_approves(

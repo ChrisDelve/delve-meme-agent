@@ -253,6 +253,39 @@ class PumpBuyV2PreSignValidationTests(
             rpc,
         )
 
+    async def test_invalid_expiry_provenance_denies(
+        self,
+    ):
+        from dataclasses import replace
+
+        message_plan = replace(
+            self.message_plan,
+            last_valid_block_height=True,
+        )
+
+        result, rpc = await self.validate(
+            message_plan=message_plan,
+        )
+
+        self.assertEqual(
+            result.status,
+            "DENY",
+        )
+
+        self.assertIn(
+            "BLOCKHASH_EXPIRY_PROVENANCE_INVALID",
+            result.reasons,
+        )
+
+        self.assertFalse(
+            result.allows_signing
+        )
+
+        self.assertEqual(
+            rpc.calls,
+            [],
+        )
+
     async def test_valid_chain_state_approves(
         self,
     ):

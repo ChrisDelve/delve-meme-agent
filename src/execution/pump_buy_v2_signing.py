@@ -10,6 +10,9 @@ from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import VersionedTransaction
 
+from src.execution.live_blockhash_context import (
+    LIVE_BLOCKHASH_CONTEXT_VERSION,
+)
 from src.execution.order_authorization import (
     AUTHORIZATION_VERSION,
     AUTHORIZE,
@@ -49,7 +52,7 @@ from src.portfolio.live_reservations import (
 
 
 PUMP_BUY_V2_SIGNING_VERSION = (
-    "pump-buy-v2-signing-v1"
+    "pump-buy-v2-signing-v2"
 )
 
 PASS = "PASS"
@@ -87,6 +90,10 @@ class PumpBuyV2SigningResult:
 
     reservation_changed: bool | None
     signed_at: float | None
+
+    blockhash_context_version: str | None = None
+    last_valid_block_height: int | None = None
+    blockhash_rpc_slot: int | None = None
 
     @property
     def is_durably_signed(self) -> bool:
@@ -141,6 +148,10 @@ async def sign_and_bind_pump_buy_v2(
     reservation_changed: bool | None = None
     signed_at: float | None = None
 
+    blockhash_context_version: str | None = None
+    last_valid_block_height: int | None = None
+    blockhash_rpc_slot: int | None = None
+
     def finish(
         status: str,
         *reasons: str,
@@ -165,6 +176,15 @@ async def sign_and_bind_pump_buy_v2(
             ),
             message_sha256=(
                 message_sha256
+            ),
+            blockhash_context_version=(
+                blockhash_context_version
+            ),
+            last_valid_block_height=(
+                last_valid_block_height
+            ),
+            blockhash_rpc_slot=(
+                blockhash_rpc_slot
             ),
             signed_transaction_sha256=(
                 persisted_transaction_sha256
@@ -258,6 +278,109 @@ async def sign_and_bind_pump_buy_v2(
             BLOCK,
             "EXECUTION_PREFLIGHT_NOT_APPROVED",
         )
+
+    #
+    # Signing is authorized only for the exact
+    # expiry-aware message contract approved by
+    # both upstream validation stages.
+    #
+    plan_blockhash_context_version = getattr(
+        message_plan,
+        "blockhash_context_version",
+        None,
+    )
+
+    plan_last_valid_block_height = getattr(
+        message_plan,
+        "last_valid_block_height",
+        None,
+    )
+
+    plan_blockhash_rpc_slot = getattr(
+        message_plan,
+        "blockhash_rpc_slot",
+        None,
+    )
+
+    if (
+        plan_blockhash_context_version
+        != LIVE_BLOCKHASH_CONTEXT_VERSION
+        or not isinstance(
+            plan_last_valid_block_height,
+            int,
+        )
+        or isinstance(
+            plan_last_valid_block_height,
+            bool,
+        )
+        or plan_last_valid_block_height < 0
+        or not isinstance(
+            plan_blockhash_rpc_slot,
+            int,
+        )
+        or isinstance(
+            plan_blockhash_rpc_slot,
+            bool,
+        )
+        or plan_blockhash_rpc_slot < 0
+    ):
+        return finish(
+            BLOCK,
+            "BLOCKHASH_EXPIRY_PROVENANCE_INVALID",
+        )
+
+    if (
+        getattr(
+            network_validation,
+            "blockhash_context_version",
+            None,
+        )
+        != plan_blockhash_context_version
+        or getattr(
+            network_validation,
+            "last_valid_block_height",
+            None,
+        )
+        != plan_last_valid_block_height
+        or getattr(
+            network_validation,
+            "blockhash_rpc_slot",
+            None,
+        )
+        != plan_blockhash_rpc_slot
+        or getattr(
+            execution_preflight,
+            "blockhash_context_version",
+            None,
+        )
+        != plan_blockhash_context_version
+        or getattr(
+            execution_preflight,
+            "last_valid_block_height",
+            None,
+        )
+        != plan_last_valid_block_height
+        or getattr(
+            execution_preflight,
+            "blockhash_rpc_slot",
+            None,
+        )
+        != plan_blockhash_rpc_slot
+    ):
+        return finish(
+            BLOCK,
+            "BLOCKHASH_EXPIRY_BINDING_MISMATCH",
+        )
+
+    blockhash_context_version = (
+        plan_blockhash_context_version
+    )
+    last_valid_block_height = (
+        plan_last_valid_block_height
+    )
+    blockhash_rpc_slot = (
+        plan_blockhash_rpc_slot
+    )
 
     #
     # Exact reservation chain.

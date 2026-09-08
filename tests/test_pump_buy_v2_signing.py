@@ -20,6 +20,9 @@ from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import VersionedTransaction
 
+from src.execution.live_blockhash_context import (
+    LIVE_BLOCKHASH_CONTEXT_VERSION,
+)
 from src.execution.order_authorization import (
     AUTHORIZATION_VERSION,
     AUTHORIZE,
@@ -329,6 +332,11 @@ class PumpBuyV2SigningTests(
                     self.simulation_sha256
                 ),
                 payer=self.wallet_pubkey,
+                blockhash_context_version=(
+                    LIVE_BLOCKHASH_CONTEXT_VERSION
+                ),
+                last_valid_block_height=350,
+                blockhash_rpc_slot=200,
                 recent_blockhash=str(
                     recent_blockhash
                 ),
@@ -356,6 +364,11 @@ class PumpBuyV2SigningTests(
                 message_sha256=(
                     self.message_sha256
                 ),
+                blockhash_context_version=(
+                    LIVE_BLOCKHASH_CONTEXT_VERSION
+                ),
+                last_valid_block_height=350,
+                blockhash_rpc_slot=200,
                 authorized_wallet_liability_lamports=(
                     self.authorization
                     .wallet_cost_lamports
@@ -379,6 +392,11 @@ class PumpBuyV2SigningTests(
                 message_sha256=(
                     self.message_sha256
                 ),
+                blockhash_context_version=(
+                    LIVE_BLOCKHASH_CONTEXT_VERSION
+                ),
+                last_valid_block_height=350,
+                blockhash_rpc_slot=200,
                 authorized_wallet_liability_lamports=(
                     self.authorization
                     .wallet_cost_lamports
@@ -605,6 +623,51 @@ class PumpBuyV2SigningTests(
             load_mock,
             bind_mock,
         )
+
+    def test_expiry_binding_mismatch_blocks_before_signing(
+        self,
+    ):
+        execution_preflight = ns_replace(
+            self.execution_preflight,
+            blockhash_rpc_slot=(
+                self.message_plan
+                .blockhash_rpc_slot
+                + 1
+            ),
+        )
+
+        signer = CountingSigner(
+            self.keypair
+        )
+
+        (
+            result,
+            returned_signer,
+            load_mock,
+            bind_mock,
+        ) = self.sign(
+            signer=signer,
+            execution_preflight=(
+                execution_preflight
+            ),
+        )
+
+        self.assertEqual(
+            result.status,
+            "BLOCK",
+        )
+
+        self.assertIn(
+            "BLOCKHASH_EXPIRY_BINDING_MISMATCH",
+            result.reasons,
+        )
+
+        self.assertEqual(
+            returned_signer.sign_calls,
+            0,
+        )
+
+        bind_mock.assert_not_called()
 
     def test_valid_signing_binds_exact_artifact(
         self,

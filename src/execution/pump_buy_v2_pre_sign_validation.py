@@ -9,6 +9,9 @@ from typing import Any
 
 from solders.message import to_bytes_versioned
 
+from src.execution.live_blockhash_context import (
+    LIVE_BLOCKHASH_CONTEXT_VERSION,
+)
 from src.execution.order_authorization import (
     AUTHORIZATION_VERSION,
     AUTHORIZE,
@@ -36,7 +39,7 @@ from src.safety.token_safety_resolver import (
 
 
 PUMP_BUY_V2_PRE_SIGN_VALIDATION_VERSION = (
-    "pump-buy-v2-pre-sign-validation-v1"
+    "pump-buy-v2-pre-sign-validation-v2"
 )
 
 APPROVE = "APPROVE"
@@ -74,6 +77,10 @@ class PumpBuyV2PreSignValidation:
     )
 
     checked_at: float
+
+    blockhash_context_version: str | None = None
+    last_valid_block_height: int | None = None
+    blockhash_rpc_slot: int | None = None
 
     @property
     def allows_signing(self) -> bool:
@@ -209,6 +216,10 @@ async def validate_pump_buy_v2_pre_sign(
         int | None
     ) = None
 
+    blockhash_context_version: str | None = None
+    last_valid_block_height: int | None = None
+    blockhash_rpc_slot: int | None = None
+
     def finish(
         status: str,
         *reasons: str,
@@ -229,6 +240,15 @@ async def validate_pump_buy_v2_pre_sign(
                 message_sha256
             ),
             payer=payer,
+            blockhash_context_version=(
+                blockhash_context_version
+            ),
+            last_valid_block_height=(
+                last_valid_block_height
+            ),
+            blockhash_rpc_slot=(
+                blockhash_rpc_slot
+            ),
             min_context_slot=(
                 min_context_slot
             ),
@@ -309,6 +329,73 @@ async def validate_pump_buy_v2_pre_sign(
             DENY,
             "MESSAGE_PLAN_VERSION_MISMATCH",
         )
+
+    #
+    # Blockhash expiry provenance must originate
+    # from the same authoritative blockhash context
+    # used to build this exact MessageV0.
+    #
+    plan_blockhash_context_version = getattr(
+        message_plan,
+        "blockhash_context_version",
+        None,
+    )
+
+    plan_last_valid_block_height = getattr(
+        message_plan,
+        "last_valid_block_height",
+        None,
+    )
+
+    plan_blockhash_rpc_slot = getattr(
+        message_plan,
+        "blockhash_rpc_slot",
+        None,
+    )
+
+    if (
+        plan_blockhash_context_version
+        != LIVE_BLOCKHASH_CONTEXT_VERSION
+    ):
+        return finish(
+            DENY,
+            "BLOCKHASH_CONTEXT_VERSION_MISMATCH",
+        )
+
+    if (
+        not isinstance(
+            plan_last_valid_block_height,
+            int,
+        )
+        or isinstance(
+            plan_last_valid_block_height,
+            bool,
+        )
+        or plan_last_valid_block_height < 0
+        or not isinstance(
+            plan_blockhash_rpc_slot,
+            int,
+        )
+        or isinstance(
+            plan_blockhash_rpc_slot,
+            bool,
+        )
+        or plan_blockhash_rpc_slot < 0
+    ):
+        return finish(
+            DENY,
+            "BLOCKHASH_EXPIRY_PROVENANCE_INVALID",
+        )
+
+    blockhash_context_version = (
+        plan_blockhash_context_version
+    )
+    last_valid_block_height = (
+        plan_last_valid_block_height
+    )
+    blockhash_rpc_slot = (
+        plan_blockhash_rpc_slot
+    )
 
     #
     # Identity/fingerprint chain.

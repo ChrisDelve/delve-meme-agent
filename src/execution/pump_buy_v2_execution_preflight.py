@@ -13,6 +13,9 @@ from solders.transaction import (
     VersionedTransaction,
 )
 
+from src.execution.live_blockhash_context import (
+    LIVE_BLOCKHASH_CONTEXT_VERSION,
+)
 from src.execution.order_authorization import (
     AUTHORIZATION_VERSION,
     AUTHORIZE,
@@ -39,7 +42,7 @@ from src.safety.token_safety_resolver import (
 
 
 PUMP_BUY_V2_EXECUTION_PREFLIGHT_VERSION = (
-    "pump-buy-v2-execution-preflight-v1"
+    "pump-buy-v2-execution-preflight-v2"
 )
 
 DENY = "DENY"
@@ -84,6 +87,10 @@ class PumpBuyV2ExecutionPreflight:
     logs: tuple[str, ...]
 
     checked_at: float
+
+    blockhash_context_version: str | None = None
+    last_valid_block_height: int | None = None
+    blockhash_rpc_slot: int | None = None
 
     @property
     def allows_signing(self) -> bool:
@@ -247,6 +254,10 @@ async def preflight_pump_buy_v2_execution(
 
     logs: tuple[str, ...] = ()
 
+    blockhash_context_version: str | None = None
+    last_valid_block_height: int | None = None
+    blockhash_rpc_slot: int | None = None
+
     def finish(
         status: str,
         *reasons: str,
@@ -265,6 +276,15 @@ async def preflight_pump_buy_v2_execution(
             ),
             message_sha256=(
                 message_sha256
+            ),
+            blockhash_context_version=(
+                blockhash_context_version
+            ),
+            last_valid_block_height=(
+                last_valid_block_height
+            ),
+            blockhash_rpc_slot=(
+                blockhash_rpc_slot
             ),
             simulation_slot=(
                 simulation_slot
@@ -347,6 +367,90 @@ async def preflight_pump_buy_v2_execution(
             DENY,
             "NETWORK_PRE_SIGN_NOT_APPROVED",
         )
+
+    #
+    # Preserve exactly the blockhash-expiry
+    # provenance already approved by pre-sign.
+    #
+    plan_blockhash_context_version = getattr(
+        message_plan,
+        "blockhash_context_version",
+        None,
+    )
+
+    plan_last_valid_block_height = getattr(
+        message_plan,
+        "last_valid_block_height",
+        None,
+    )
+
+    plan_blockhash_rpc_slot = getattr(
+        message_plan,
+        "blockhash_rpc_slot",
+        None,
+    )
+
+    if (
+        plan_blockhash_context_version
+        != LIVE_BLOCKHASH_CONTEXT_VERSION
+        or not isinstance(
+            plan_last_valid_block_height,
+            int,
+        )
+        or isinstance(
+            plan_last_valid_block_height,
+            bool,
+        )
+        or plan_last_valid_block_height < 0
+        or not isinstance(
+            plan_blockhash_rpc_slot,
+            int,
+        )
+        or isinstance(
+            plan_blockhash_rpc_slot,
+            bool,
+        )
+        or plan_blockhash_rpc_slot < 0
+    ):
+        return finish(
+            DENY,
+            "BLOCKHASH_EXPIRY_PROVENANCE_INVALID",
+        )
+
+    if (
+        getattr(
+            network_validation,
+            "blockhash_context_version",
+            None,
+        )
+        != plan_blockhash_context_version
+        or getattr(
+            network_validation,
+            "last_valid_block_height",
+            None,
+        )
+        != plan_last_valid_block_height
+        or getattr(
+            network_validation,
+            "blockhash_rpc_slot",
+            None,
+        )
+        != plan_blockhash_rpc_slot
+    ):
+        return finish(
+            DENY,
+            "BLOCKHASH_EXPIRY_BINDING_MISMATCH",
+        )
+
+    blockhash_context_version = (
+        plan_blockhash_context_version
+    )
+    last_valid_block_height = (
+        plan_last_valid_block_height
+    )
+    blockhash_rpc_slot = (
+        plan_blockhash_rpc_slot
+    )
 
     #
     # Exact artifact chain.

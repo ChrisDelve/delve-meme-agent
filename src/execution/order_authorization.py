@@ -29,7 +29,7 @@ from src.safety.token_safety_gate import (
 )
 
 
-AUTHORIZATION_VERSION = "order-authorization-v3"
+AUTHORIZATION_VERSION = "order-authorization-v4"
 
 AUTHORIZE = "AUTHORIZE"
 DENY = "DENY"
@@ -79,6 +79,10 @@ class OrderAuthorization:
 
     spend_lamports: int
     wallet_cost_lamports: int | None
+
+    base_network_fee_lamports: int | None
+    priority_fee_lamports: int | None
+    rent_lamports: int | None
 
     reservation_id: str
     reservation_version: str | None
@@ -563,6 +567,18 @@ def authorize_pump_buy(
     token_amount: int | None = None
     max_sol_cost: int | None = None
 
+    base_network_fee_lamports: (
+        int | None
+    ) = None
+
+    priority_fee_lamports: (
+        int | None
+    ) = None
+
+    rent_lamports: (
+        int | None
+    ) = None
+
     if simulation is not None:
         if not simulation.executable:
             reasons.append(
@@ -618,6 +634,118 @@ def authorize_pump_buy(
 
         else:
             max_sol_cost = raw_max_sol_cost
+
+        raw_base_network_fee = getattr(
+            simulation,
+            "base_network_fee_lamports",
+            None,
+        )
+
+        raw_priority_fee = getattr(
+            simulation,
+            "priority_fee_lamports",
+            None,
+        )
+
+        raw_rent = getattr(
+            simulation,
+            "rent_lamports",
+            None,
+        )
+
+        overhead_components = (
+            (
+                "BASE_NETWORK_FEE_OUT_OF_RANGE",
+                raw_base_network_fee,
+            ),
+            (
+                "PRIORITY_FEE_OUT_OF_RANGE",
+                raw_priority_fee,
+            ),
+            (
+                "RENT_LAMPORTS_OUT_OF_RANGE",
+                raw_rent,
+            ),
+        )
+
+        overhead_values: list[int] = []
+
+        for (
+            reason,
+            value,
+        ) in overhead_components:
+            if (
+                not isinstance(
+                    value,
+                    int,
+                )
+                or isinstance(
+                    value,
+                    bool,
+                )
+                or value < 0
+                or value > U64_MAX
+            ):
+                reasons.append(
+                    reason
+                )
+
+            else:
+                overhead_values.append(
+                    value
+                )
+
+        if len(
+            overhead_values
+        ) == 3:
+            base_network_fee_lamports = (
+                raw_base_network_fee
+            )
+
+            priority_fee_lamports = (
+                raw_priority_fee
+            )
+
+            rent_lamports = (
+                raw_rent
+            )
+
+            raw_total_overhead = getattr(
+                simulation,
+                (
+                    "total_transaction_"
+                    "overhead_lamports"
+                ),
+                None,
+            )
+
+            if (
+                not isinstance(
+                    raw_total_overhead,
+                    int,
+                )
+                or isinstance(
+                    raw_total_overhead,
+                    bool,
+                )
+                or raw_total_overhead < 0
+                or raw_total_overhead > U64_MAX
+            ):
+                reasons.append(
+                    "TOTAL_TRANSACTION_OVERHEAD_OUT_OF_RANGE"
+                )
+
+            elif (
+                (
+                    base_network_fee_lamports
+                    + priority_fee_lamports
+                    + rent_lamports
+                )
+                != raw_total_overhead
+            ):
+                reasons.append(
+                    "TRANSACTION_OVERHEAD_COMPONENT_SUM_MISMATCH"
+                )
 
         if (
             simulation.spendable_quote_in
@@ -739,6 +867,15 @@ def authorize_pump_buy(
             None
             if reservation is None
             else reservation.wallet_cost_lamports
+        ),
+        base_network_fee_lamports=(
+            base_network_fee_lamports
+        ),
+        priority_fee_lamports=(
+            priority_fee_lamports
+        ),
+        rent_lamports=(
+            rent_lamports
         ),
         reservation_id=reservation_id,
         reservation_version=(

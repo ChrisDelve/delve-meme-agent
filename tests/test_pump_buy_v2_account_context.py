@@ -136,6 +136,13 @@ class PumpBuyV2AccountContextTests(
             wallet_cost_lamports=(
                 9_050_000
             ),
+            base_network_fee_lamports=(
+                5_000
+            ),
+            priority_fee_lamports=(
+                45_000
+            ),
+            rent_lamports=0,
             reservation_id=(
                 "reservation-123"
             ),

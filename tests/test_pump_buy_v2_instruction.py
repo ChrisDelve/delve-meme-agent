@@ -52,7 +52,7 @@ class PumpBuyV2InstructionTests(
                 PUMP_BUY_V2_ACCOUNT_CONTEXT_VERSION
             ),
             authorization_version=(
-                "order-authorization-v3"
+                "order-authorization-v4"
             ),
             reservation_id=(
                 "reservation-123"

@@ -125,6 +125,9 @@ class OrderAuthorizationTests(
         self,
         *,
         ttl: float = 60.0,
+        base_network_fee_lamports: int = 0,
+        priority_fee_lamports: int = 0,
+        rent_lamports: int = 0,
     ):
         decision = reserve_pump_buy_capital(
             mint=MINT,
@@ -137,9 +140,15 @@ class OrderAuthorizationTests(
             protocol_fee_bps=0,
             creator_fee_bps=0,
             slippage_bps=0,
-            base_network_fee_lamports=0,
-            priority_fee_lamports=0,
-            rent_lamports=0,
+            base_network_fee_lamports=(
+                base_network_fee_lamports
+            ),
+            priority_fee_lamports=(
+                priority_fee_lamports
+            ),
+            rent_lamports=(
+                rent_lamports
+            ),
             reservation_ttl_seconds=ttl,
             policy=self.policy,
             db_path=self.db_path,
@@ -363,6 +372,96 @@ class OrderAuthorizationTests(
             result.is_valid()
         )
 
+    def test_active_authorization_binds_transaction_overhead(
+        self,
+    ):
+        (
+            reservation,
+            safety,
+            execution,
+            live_curve,
+        ) = self.make_context(
+            base_network_fee_lamports=5_000,
+            priority_fee_lamports=7_000,
+            rent_lamports=11_000,
+        )
+
+        result = self.authorize(
+            reservation=reservation,
+            safety=safety,
+            execution=execution,
+            live_curve=live_curve,
+        )
+
+        self.assertEqual(
+            result.status,
+            AUTHORIZE,
+        )
+
+        self.assertEqual(
+            result.base_network_fee_lamports,
+            5_000,
+        )
+
+        self.assertEqual(
+            result.priority_fee_lamports,
+            7_000,
+        )
+
+        self.assertEqual(
+            result.rent_lamports,
+            11_000,
+        )
+
+        self.assertEqual(
+            (
+                result.base_network_fee_lamports
+                + result.priority_fee_lamports
+                + result.rent_lamports
+            ),
+            (
+                execution
+                .simulation
+                .total_transaction_overhead_lamports
+            ),
+        )
+
+    def test_transaction_overhead_sum_mismatch_denies(
+        self,
+    ):
+        (
+            reservation,
+            safety,
+            execution,
+            live_curve,
+        ) = self.make_context(
+            base_network_fee_lamports=5_000,
+            priority_fee_lamports=7_000,
+            rent_lamports=11_000,
+        )
+
+        execution.simulation = replace(
+            execution.simulation,
+            priority_fee_lamports=7_001,
+        )
+
+        result = self.authorize(
+            reservation=reservation,
+            safety=safety,
+            execution=execution,
+            live_curve=live_curve,
+        )
+
+        self.assertEqual(
+            result.status,
+            DENY,
+        )
+
+        self.assertIn(
+            "TRANSACTION_OVERHEAD_COMPONENT_SUM_MISMATCH",
+            result.reasons,
+        )
+
     def test_active_authorization_binds_transaction_contract(
         self,
     ):
@@ -387,7 +486,7 @@ class OrderAuthorizationTests(
 
         self.assertEqual(
             result.authorization_version,
-            "order-authorization-v3",
+            "order-authorization-v4",
         )
 
         self.assertEqual(

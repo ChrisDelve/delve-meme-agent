@@ -15,6 +15,10 @@ from solders.message import (
 )
 from solders.pubkey import Pubkey
 
+from src.execution.live_blockhash_context import (
+    LIVE_BLOCKHASH_CONTEXT_VERSION,
+    LiveBlockhashContext,
+)
 from src.execution.order_authorization import (
     AUTHORIZATION_VERSION,
     AUTHORIZE,
@@ -32,7 +36,7 @@ from src.execution.pump_buy_v2_instruction import (
 
 
 PUMP_BUY_V2_UNSIGNED_MESSAGE_VERSION = (
-    "pump-buy-v2-unsigned-message-v1"
+    "pump-buy-v2-unsigned-message-v2"
 )
 
 MICRO_LAMPORTS_PER_LAMPORT = 1_000_000
@@ -62,7 +66,11 @@ class PumpBuyV2UnsignedMessagePlan:
     simulation_sha256: str
 
     payer: str
+
+    blockhash_context_version: str
     recent_blockhash: str
+    last_valid_block_height: int
+    blockhash_rpc_slot: int
 
     compute_unit_limit: int
     compute_unit_price_micro_lamports: int
@@ -234,7 +242,7 @@ def build_unsigned_pump_buy_v2_message(
     *,
     authorization: OrderAuthorization,
     context: PumpBuyV2AccountContext,
-    recent_blockhash: str,
+    blockhash_context: LiveBlockhashContext,
     compute_unit_limit: int,
 ) -> PumpBuyV2UnsignedMessagePlan:
 
@@ -539,12 +547,69 @@ def build_unsigned_pump_buy_v2_message(
     )
 
     #
-    # Blockhash is supplied externally but must be
-    # a real-looking non-default Solana hash.
+    # The blockhash and its expiry height must come
+    # from one authoritative getLatestBlockhash
+    # artifact. They are never accepted separately.
     #
+    if not isinstance(
+        blockhash_context,
+        LiveBlockhashContext,
+    ):
+        raise PumpBuyV2UnsignedMessageError(
+            "Live blockhash context is invalid."
+        )
+
+    if (
+        blockhash_context.resolver_version
+        != LIVE_BLOCKHASH_CONTEXT_VERSION
+    ):
+        raise PumpBuyV2UnsignedMessageError(
+            "Live blockhash context version "
+            "is unsupported."
+        )
+
+    for label, value in (
+        (
+            "blockhash rpc slot",
+            blockhash_context.rpc_slot,
+        ),
+        (
+            "blockhash minimum context slot",
+            blockhash_context.min_context_slot,
+        ),
+        (
+            "last valid block height",
+            blockhash_context
+            .last_valid_block_height,
+        ),
+    ):
+        if (
+            not isinstance(
+                value,
+                int,
+            )
+            or isinstance(
+                value,
+                bool,
+            )
+            or value < 0
+        ):
+            raise PumpBuyV2UnsignedMessageError(
+                f"{label} is invalid."
+            )
+
+    if (
+        blockhash_context.rpc_slot
+        < blockhash_context.min_context_slot
+    ):
+        raise PumpBuyV2UnsignedMessageError(
+            "Live blockhash RPC context predates "
+            "its minimum context slot."
+        )
+
     try:
         blockhash = Hash.from_string(
-            recent_blockhash
+            blockhash_context.blockhash
         )
 
     except Exception as error:
@@ -814,8 +879,19 @@ def build_unsigned_pump_buy_v2_message(
         payer=str(
             payer
         ),
+        blockhash_context_version=(
+            blockhash_context
+            .resolver_version
+        ),
         recent_blockhash=str(
             blockhash
+        ),
+        last_valid_block_height=(
+            blockhash_context
+            .last_valid_block_height
+        ),
+        blockhash_rpc_slot=(
+            blockhash_context.rpc_slot
         ),
         compute_unit_limit=(
             cu_limit

@@ -8,6 +8,10 @@ from solders.pubkey import Pubkey
 from src.execution.live_pump_fee_state import (
     PUMP_FEE_PROGRAM,
 )
+from src.execution.live_blockhash_context import (
+    LIVE_BLOCKHASH_CONTEXT_VERSION,
+    LiveBlockhashContext,
+)
 from src.execution.order_authorization import (
     AUTHORIZATION_VERSION,
     AUTHORIZE,
@@ -312,6 +316,7 @@ class PumpBuyV2UnsignedMessageTests(
         authorization=None,
         context=None,
         blockhash=None,
+        blockhash_context=None,
         compute_unit_limit=250_000,
     ):
         return (
@@ -326,16 +331,111 @@ class PumpBuyV2UnsignedMessageTests(
                     if context is None
                     else context
                 ),
-                recent_blockhash=str(
-                    self.blockhash
-                    if blockhash is None
-                    else blockhash
+                blockhash_context=(
+                    LiveBlockhashContext(
+                        resolver_version=(
+                            LIVE_BLOCKHASH_CONTEXT_VERSION
+                        ),
+                        blockhash=str(
+                            self.blockhash
+                            if blockhash is None
+                            else blockhash
+                        ),
+                        last_valid_block_height=350,
+                        rpc_slot=200,
+                        min_context_slot=100,
+                        commitment="confirmed",
+                        fetched_at=1.0,
+                    )
+                    if blockhash_context is None
+                    else blockhash_context
                 ),
                 compute_unit_limit=(
                     compute_unit_limit
                 ),
             )
         )
+
+    def test_blockhash_context_version_mismatch_rejected(
+        self,
+    ):
+        bad_context = LiveBlockhashContext(
+            resolver_version=(
+                "live-blockhash-context-old"
+            ),
+            blockhash=str(
+                self.blockhash
+            ),
+            last_valid_block_height=350,
+            rpc_slot=200,
+            min_context_slot=100,
+            commitment="confirmed",
+            fetched_at=1.0,
+        )
+
+        with self.assertRaisesRegex(
+            Exception,
+            "version",
+        ):
+            self.build(
+                blockhash_context=(
+                    bad_context
+                )
+            )
+
+    def test_blockhash_context_slot_regression_rejected(
+        self,
+    ):
+        bad_context = LiveBlockhashContext(
+            resolver_version=(
+                LIVE_BLOCKHASH_CONTEXT_VERSION
+            ),
+            blockhash=str(
+                self.blockhash
+            ),
+            last_valid_block_height=350,
+            rpc_slot=99,
+            min_context_slot=100,
+            commitment="confirmed",
+            fetched_at=1.0,
+        )
+
+        with self.assertRaisesRegex(
+            Exception,
+            "predates",
+        ):
+            self.build(
+                blockhash_context=(
+                    bad_context
+                )
+            )
+
+    def test_invalid_last_valid_block_height_rejected(
+        self,
+    ):
+        bad_context = LiveBlockhashContext(
+            resolver_version=(
+                LIVE_BLOCKHASH_CONTEXT_VERSION
+            ),
+            blockhash=str(
+                self.blockhash
+            ),
+            last_valid_block_height=True,
+            rpc_slot=200,
+            min_context_slot=100,
+            commitment="confirmed",
+            fetched_at=1.0,
+        )
+
+        with self.assertRaisesRegex(
+            Exception,
+            "last valid block height",
+        ):
+            self.build(
+                blockhash_context=(
+                    bad_context
+                )
+            )
 
     def test_builds_unsigned_message_v0(
         self,
@@ -345,6 +445,28 @@ class PumpBuyV2UnsignedMessageTests(
         self.assertEqual(
             result.builder_version,
             PUMP_BUY_V2_UNSIGNED_MESSAGE_VERSION,
+        )
+
+        self.assertEqual(
+            result.blockhash_context_version,
+            LIVE_BLOCKHASH_CONTEXT_VERSION,
+        )
+
+        self.assertEqual(
+            result.recent_blockhash,
+            str(
+                self.blockhash
+            ),
+        )
+
+        self.assertEqual(
+            result.last_valid_block_height,
+            350,
+        )
+
+        self.assertEqual(
+            result.blockhash_rpc_slot,
+            200,
         )
 
         self.assertEqual(

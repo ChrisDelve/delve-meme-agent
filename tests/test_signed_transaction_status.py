@@ -7,6 +7,13 @@ from unittest.mock import patch
 
 from solders.hash import Hash
 from solders.keypair import Keypair
+from solders.message import (
+    MessageV0,
+    to_bytes_versioned,
+)
+from solders.transaction import (
+    VersionedTransaction,
+)
 
 from src.execution.signed_transaction_status import (
     ABSENT_EXPIRED,
@@ -112,19 +119,45 @@ class SignedTransactionStatusTests(
             / "live.db"
         )
 
-        self.transaction_bytes = (
-            b"durably-signed-transaction"
-        )
-
-        self.signature = str(
-            Keypair().sign_message(
-                b"status-resolver-test"
-            )
-        )
+        self.signer = Keypair()
 
         self.blockhash = str(
             Hash.new_unique()
         )
+
+        self.message = (
+            MessageV0.try_compile(
+                self.signer.pubkey(),
+                [],
+                [],
+                Hash.from_string(
+                    self.blockhash
+                ),
+            )
+        )
+
+        self.transaction = (
+            VersionedTransaction(
+                self.message,
+                [
+                    self.signer,
+                ],
+            )
+        )
+
+        self.transaction_bytes = bytes(
+            self.transaction
+        )
+
+        self.signature = str(
+            self.transaction.signatures[0]
+        )
+
+        self.message_sha256 = sha256(
+            to_bytes_versioned(
+                self.message
+            )
+        ).hexdigest()
 
         self.reservation = (
             LiveCapitalReservation(
@@ -163,7 +196,7 @@ class SignedTransactionStatusTests(
                     self.signature
                 ),
                 signed_message_sha256=(
-                    "11" * 32
+                    self.message_sha256
                 ),
                 signed_transaction_sha256=(
                     sha256(
@@ -625,6 +658,218 @@ class SignedTransactionStatusTests(
 
         self.assertIn(
             "INVALID_RECENT_BLOCKHASH",
+            result.reasons,
+        )
+
+        self.assertEqual(
+            rpc.calls,
+            [],
+        )
+
+    async def test_malformed_serialized_transaction_stops_before_rpc(
+        self,
+    ):
+        transaction_bytes = (
+            b"not-a-versioned-transaction"
+        )
+
+        reservation = replace(
+            self.reservation,
+            signed_transaction_bytes=(
+                transaction_bytes
+            ),
+            signed_transaction_sha256=(
+                sha256(
+                    transaction_bytes
+                ).hexdigest()
+            ),
+        )
+
+        rpc = FakeStatusRpc(
+            recent_response=None,
+        )
+
+        result, rpc, _ = await self.resolve(
+            reservation=reservation,
+            rpc=rpc,
+        )
+
+        self.assertEqual(
+            result.state,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "SIGNED_TRANSACTION_DESERIALIZATION_FAILED",
+            result.reasons,
+        )
+
+        self.assertEqual(
+            rpc.calls,
+            [],
+        )
+
+    async def test_embedded_signature_mismatch_stops_before_rpc(
+        self,
+    ):
+        different_signature = str(
+            Keypair().sign_message(
+                b"different-signature"
+            )
+        )
+
+        reservation = replace(
+            self.reservation,
+            transaction_signature=(
+                different_signature
+            ),
+        )
+
+        rpc = FakeStatusRpc(
+            recent_response=None,
+        )
+
+        result, rpc, _ = await self.resolve(
+            reservation=reservation,
+            rpc=rpc,
+        )
+
+        self.assertEqual(
+            result.state,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "SIGNED_TRANSACTION_EMBEDDED_SIGNATURE_MISMATCH",
+            result.reasons,
+        )
+
+        self.assertEqual(
+            rpc.calls,
+            [],
+        )
+
+    async def test_embedded_message_hash_mismatch_stops_before_rpc(
+        self,
+    ):
+        reservation = replace(
+            self.reservation,
+            signed_message_sha256=(
+                "44" * 32
+            ),
+        )
+
+        rpc = FakeStatusRpc(
+            recent_response=None,
+        )
+
+        result, rpc, _ = await self.resolve(
+            reservation=reservation,
+            rpc=rpc,
+        )
+
+        self.assertEqual(
+            result.state,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "SIGNED_TRANSACTION_MESSAGE_HASH_MISMATCH",
+            result.reasons,
+        )
+
+        self.assertEqual(
+            rpc.calls,
+            [],
+        )
+
+    async def test_embedded_blockhash_mismatch_stops_before_rpc(
+        self,
+    ):
+        reservation = replace(
+            self.reservation,
+            recent_blockhash=str(
+                Hash.new_unique()
+            ),
+        )
+
+        rpc = FakeStatusRpc(
+            recent_response=None,
+        )
+
+        result, rpc, _ = await self.resolve(
+            reservation=reservation,
+            rpc=rpc,
+        )
+
+        self.assertEqual(
+            result.state,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "SIGNED_TRANSACTION_BLOCKHASH_MISMATCH",
+            result.reasons,
+        )
+
+        self.assertEqual(
+            rpc.calls,
+            [],
+        )
+
+    async def test_invalid_embedded_signature_stops_before_rpc(
+        self,
+    ):
+        wrong_signature = (
+            Keypair().sign_message(
+                b"wrong-message"
+            )
+        )
+
+        invalid_transaction = (
+            VersionedTransaction.populate(
+                self.message,
+                [
+                    wrong_signature,
+                ],
+            )
+        )
+
+        transaction_bytes = bytes(
+            invalid_transaction
+        )
+
+        reservation = replace(
+            self.reservation,
+            transaction_signature=str(
+                wrong_signature
+            ),
+            signed_transaction_bytes=(
+                transaction_bytes
+            ),
+            signed_transaction_sha256=(
+                sha256(
+                    transaction_bytes
+                ).hexdigest()
+            ),
+        )
+
+        rpc = FakeStatusRpc(
+            recent_response=None,
+        )
+
+        result, rpc, _ = await self.resolve(
+            reservation=reservation,
+            rpc=rpc,
+        )
+
+        self.assertEqual(
+            result.state,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "SIGNED_TRANSACTION_SIGNATURE_VERIFICATION_FAILED",
             result.reasons,
         )
 

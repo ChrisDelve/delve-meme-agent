@@ -4,7 +4,14 @@ from typing import Any
 import hashlib
 
 from solders.hash import Hash
+from solders.message import (
+    MessageV0,
+    to_bytes_versioned,
+)
 from solders.signature import Signature
+from solders.transaction import (
+    VersionedTransaction,
+)
 
 from src.portfolio.live_reservations import (
     DB_PATH,
@@ -22,7 +29,7 @@ from src.safety.token_safety_resolver import (
 
 
 SIGNED_TRANSACTION_STATUS_RESOLVER_VERSION = (
-    "signed-transaction-status-resolver-v2"
+    "signed-transaction-status-resolver-v3"
 )
 
 KNOWN = "KNOWN"
@@ -223,6 +230,145 @@ def _validate_signed_reservation(
         reasons.append(
             "SIGNED_TRANSACTION_HASH_MISMATCH"
         )
+
+    else:
+        try:
+            recovered_transaction = (
+                VersionedTransaction.from_bytes(
+                    transaction_bytes
+                )
+            )
+        except Exception:
+            recovered_transaction = None
+
+            reasons.append(
+                "SIGNED_TRANSACTION_DESERIALIZATION_FAILED"
+            )
+
+        if recovered_transaction is not None:
+            try:
+                recovered_roundtrip_bytes = bytes(
+                    recovered_transaction
+                )
+            except Exception:
+                recovered_roundtrip_bytes = None
+
+                reasons.append(
+                    "SIGNED_TRANSACTION_ROUNDTRIP_FAILED"
+                )
+
+            if (
+                recovered_roundtrip_bytes
+                is not None
+                and recovered_roundtrip_bytes
+                != transaction_bytes
+            ):
+                reasons.append(
+                    "SIGNED_TRANSACTION_ROUNDTRIP_MISMATCH"
+                )
+
+            recovered_message = (
+                recovered_transaction.message
+            )
+
+            if not isinstance(
+                recovered_message,
+                MessageV0,
+            ):
+                reasons.append(
+                    "SIGNED_TRANSACTION_MESSAGE_TYPE_INVALID"
+                )
+
+            if (
+                parsed_signature is not None
+                and parsed_signature
+                != Signature.default()
+                and tuple(
+                    recovered_transaction.signatures
+                )
+                != (
+                    parsed_signature,
+                )
+            ):
+                reasons.append(
+                    "SIGNED_TRANSACTION_EMBEDDED_SIGNATURE_MISMATCH"
+                )
+
+            try:
+                verification_results = (
+                    recovered_transaction
+                    .verify_with_results()
+                )
+            except Exception:
+                verification_results = None
+
+                reasons.append(
+                    "SIGNED_TRANSACTION_SIGNATURE_VERIFICATION_FAILED"
+                )
+
+            if (
+                verification_results
+                is not None
+                and verification_results
+                != [
+                    True,
+                ]
+            ):
+                reasons.append(
+                    "SIGNED_TRANSACTION_SIGNATURE_VERIFICATION_FAILED"
+                )
+
+            try:
+                recovered_message_bytes = (
+                    to_bytes_versioned(
+                        recovered_message
+                    )
+                )
+            except Exception:
+                recovered_message_bytes = None
+
+                reasons.append(
+                    "SIGNED_MESSAGE_SERIALIZATION_FAILED"
+                )
+
+            if (
+                recovered_message_bytes
+                is not None
+                and _valid_sha256(
+                    reservation
+                    .signed_message_sha256
+                )
+                and hashlib.sha256(
+                    recovered_message_bytes
+                ).hexdigest()
+                != reservation
+                .signed_message_sha256
+            ):
+                reasons.append(
+                    "SIGNED_TRANSACTION_MESSAGE_HASH_MISMATCH"
+                )
+
+            try:
+                recovered_blockhash = str(
+                    recovered_message
+                    .recent_blockhash
+                )
+            except Exception:
+                recovered_blockhash = None
+
+            if (
+                recovered_blockhash
+                is not None
+                and isinstance(
+                    reservation.recent_blockhash,
+                    str,
+                )
+                and recovered_blockhash
+                != reservation.recent_blockhash
+            ):
+                reasons.append(
+                    "SIGNED_TRANSACTION_BLOCKHASH_MISMATCH"
+                )
 
     recent_blockhash = (
         reservation.recent_blockhash

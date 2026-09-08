@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from solders.hash import Hash
 from solders.pubkey import Pubkey
 
 from src.execution.simulation_fingerprint import (
@@ -29,7 +30,7 @@ from src.risk.risk_governor import (
 
 DB_PATH = Path("logs/delve_live.db")
 
-RESERVATION_VERSION = "live-capital-reservation-v5"
+RESERVATION_VERSION = "live-capital-reservation-v6"
 
 ACTIVE = "ACTIVE"
 SIGNED = "SIGNED"
@@ -38,6 +39,8 @@ RELEASED = "RELEASED"
 EXPIRED = "EXPIRED"
 
 BUY = "BUY"
+
+SQLITE_INT_MAX = (1 << 63) - 1
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,10 @@ class LiveCapitalReservation:
     signed_message_sha256: str | None = None
     signed_transaction_sha256: str | None = None
     signed_transaction_bytes: bytes | None = None
+
+    recent_blockhash: str | None = None
+    last_valid_block_height: int | None = None
+    blockhash_rpc_slot: int | None = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +194,10 @@ def init_schema(
             signed_transaction_sha256 TEXT,
             signed_transaction_bytes BLOB,
 
+            recent_blockhash TEXT,
+            last_valid_block_height INTEGER,
+            blockhash_rpc_slot INTEGER,
+
             terminal_at REAL,
             terminal_reason TEXT
         )
@@ -275,6 +286,39 @@ def init_schema(
             """
             ALTER TABLE live_capital_reservations
             ADD COLUMN signed_transaction_bytes BLOB
+            """
+        )
+
+    if (
+        "recent_blockhash"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN recent_blockhash TEXT
+            """
+        )
+
+    if (
+        "last_valid_block_height"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN last_valid_block_height INTEGER
+            """
+        )
+
+    if (
+        "blockhash_rpc_slot"
+        not in reservation_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE live_capital_reservations
+            ADD COLUMN blockhash_rpc_slot INTEGER
             """
         )
 
@@ -731,6 +775,9 @@ def reserve_pump_buy_capital(
             signed_message_sha256=None,
             signed_transaction_sha256=None,
             signed_transaction_bytes=None,
+            recent_blockhash=None,
+            last_valid_block_height=None,
+            blockhash_rpc_slot=None,
         )
 
         connection.execute(
@@ -894,6 +941,27 @@ def _row_to_reservation(
                 row["signed_transaction_bytes"]
             )
         ),
+        recent_blockhash=(
+            None
+            if row["recent_blockhash"] is None
+            else str(
+                row["recent_blockhash"]
+            )
+        ),
+        last_valid_block_height=(
+            None
+            if row["last_valid_block_height"] is None
+            else int(
+                row["last_valid_block_height"]
+            )
+        ),
+        blockhash_rpc_slot=(
+            None
+            if row["blockhash_rpc_slot"] is None
+            else int(
+                row["blockhash_rpc_slot"]
+            )
+        ),
     )
 
 
@@ -973,6 +1041,9 @@ def bind_reservation_signed_transaction(
     transaction_signature: str,
     signed_message_sha256: str,
     signed_transaction_bytes: bytes,
+    recent_blockhash: str,
+    last_valid_block_height: int,
+    blockhash_rpc_slot: int,
     db_path: Path = DB_PATH,
 ) -> ReservationTransitionResult:
     """
@@ -1062,6 +1133,101 @@ def bind_reservation_signed_transaction(
             status=UNKNOWN,
             reasons=(
                 "INVALID_SIGNED_TRANSACTION_BYTES",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    if not isinstance(
+        recent_blockhash,
+        str,
+    ):
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_RECENT_BLOCKHASH",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    recent_blockhash = (
+        recent_blockhash.strip()
+    )
+
+    try:
+        parsed_recent_blockhash = (
+            Hash.from_string(
+                recent_blockhash
+            )
+        )
+    except Exception:
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_RECENT_BLOCKHASH",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    if (
+        not recent_blockhash
+        or parsed_recent_blockhash
+        == Hash.default()
+    ):
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_RECENT_BLOCKHASH",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    recent_blockhash = str(
+        parsed_recent_blockhash
+    )
+
+    if (
+        not isinstance(
+            last_valid_block_height,
+            int,
+        )
+        or isinstance(
+            last_valid_block_height,
+            bool,
+        )
+        or last_valid_block_height < 0
+        or last_valid_block_height
+        > SQLITE_INT_MAX
+    ):
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_LAST_VALID_BLOCK_HEIGHT",
+            ),
+            reservation=None,
+            changed=False,
+        )
+
+    if (
+        not isinstance(
+            blockhash_rpc_slot,
+            int,
+        )
+        or isinstance(
+            blockhash_rpc_slot,
+            bool,
+        )
+        or blockhash_rpc_slot < 0
+        or blockhash_rpc_slot
+        > SQLITE_INT_MAX
+    ):
+        return ReservationTransitionResult(
+            status=UNKNOWN,
+            reasons=(
+                "INVALID_BLOCKHASH_RPC_SLOT",
             ),
             reservation=None,
             changed=False,
@@ -1179,6 +1345,15 @@ def bind_reservation_signed_transaction(
                     and
                     reservation.signed_transaction_bytes
                     == signed_transaction_bytes
+                    and
+                    reservation.recent_blockhash
+                    == recent_blockhash
+                    and
+                    reservation.last_valid_block_height
+                    == last_valid_block_height
+                    and
+                    reservation.blockhash_rpc_slot
+                    == blockhash_rpc_slot
                 ):
                     connection.commit()
 
@@ -1235,7 +1410,10 @@ def bind_reservation_signed_transaction(
                 transaction_signature = ?,
                 signed_message_sha256 = ?,
                 signed_transaction_sha256 = ?,
-                signed_transaction_bytes = ?
+                signed_transaction_bytes = ?,
+                recent_blockhash = ?,
+                last_valid_block_height = ?,
+                blockhash_rpc_slot = ?
 
             WHERE reservation_id = ?
               AND status = ?
@@ -1247,6 +1425,9 @@ def bind_reservation_signed_transaction(
                 signed_message_sha256,
                 signed_transaction_sha256,
                 signed_transaction_bytes,
+                recent_blockhash,
+                last_valid_block_height,
+                blockhash_rpc_slot,
                 reservation_id,
                 ACTIVE,
             ),

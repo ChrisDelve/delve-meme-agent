@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import time
 import unittest
 
+from solders.hash import Hash
 from solders.pubkey import Pubkey
 
 from src.execution.live_curve_state import (
@@ -735,6 +736,11 @@ class OrderAuthorizationTests(
                 signed_transaction_bytes=(
                     b"signed-order-authorization-test"
                 ),
+                recent_blockhash=str(
+                    Hash.new_unique()
+                ),
+                last_valid_block_height=350,
+                blockhash_rpc_slot=200,
                 db_path=self.db_path,
             )
         )

@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from solders.hash import Hash
 from solders.pubkey import Pubkey
 
 from src.execution.pump_execution_simulator import (
@@ -16,6 +17,7 @@ from src.portfolio.live_reservations import (
     SUBMITTED,
     get_connection,
     init_schema,
+    load_capital_reservation,
     bind_reservation_signed_transaction,
     release_active_reservation,
     reserve_pump_buy_capital,
@@ -33,6 +35,12 @@ class LiveReservationTests(unittest.TestCase):
         self.wallet_pubkey = str(
             Pubkey.new_unique()
         )
+
+        self.recent_blockhash = str(
+            Hash.new_unique()
+        )
+        self.last_valid_block_height = 350
+        self.blockhash_rpc_slot = 200
 
         self.db_path = (
             Path(self.temp_dir.name)
@@ -89,6 +97,9 @@ class LiveReservationTests(unittest.TestCase):
         db_path=None,
         signed_message_sha256: str | None = None,
         signed_transaction_bytes: bytes | None = None,
+        recent_blockhash: str | None = None,
+        last_valid_block_height: int | None = None,
+        blockhash_rpc_slot: int | None = None,
     ):
         if db_path is None:
             db_path = self.db_path
@@ -106,6 +117,21 @@ class LiveReservationTests(unittest.TestCase):
                 "utf-8"
             )
 
+        if recent_blockhash is None:
+            recent_blockhash = (
+                self.recent_blockhash
+            )
+
+        if last_valid_block_height is None:
+            last_valid_block_height = (
+                self.last_valid_block_height
+            )
+
+        if blockhash_rpc_slot is None:
+            blockhash_rpc_slot = (
+                self.blockhash_rpc_slot
+            )
+
         return bind_reservation_signed_transaction(
             reservation_id=reservation_id,
             transaction_signature=(
@@ -116,6 +142,13 @@ class LiveReservationTests(unittest.TestCase):
             ),
             signed_transaction_bytes=(
                 signed_transaction_bytes
+            ),
+            recent_blockhash=recent_blockhash,
+            last_valid_block_height=(
+                last_valid_block_height
+            ),
+            blockhash_rpc_slot=(
+                blockhash_rpc_slot
             ),
             db_path=db_path,
         )
@@ -934,6 +967,21 @@ class LiveReservationTests(unittest.TestCase):
             64,
         )
 
+        self.assertEqual(
+            first.reservation.recent_blockhash,
+            self.recent_blockhash,
+        )
+
+        self.assertEqual(
+            first.reservation.last_valid_block_height,
+            self.last_valid_block_height,
+        )
+
+        self.assertEqual(
+            first.reservation.blockhash_rpc_slot,
+            self.blockhash_rpc_slot,
+        )
+
         retry = self.bind_signed(
             reservation_id=(
                 result.reservation
@@ -956,6 +1004,158 @@ class LiveReservationTests(unittest.TestCase):
             retry.reservation
             .transaction_signature,
             "SignatureA",
+        )
+
+    def test_invalid_signed_recent_blockhash_fails_closed(
+        self,
+    ):
+        result = self.reserve(
+            "MintInvalidBlockhash"
+        )
+
+        transition = self.bind_signed(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            transaction_signature=(
+                "SignatureInvalidBlockhash"
+            ),
+            recent_blockhash=(
+                "not-a-solana-blockhash"
+            ),
+        )
+
+        self.assertEqual(
+            transition.status,
+            "UNKNOWN",
+        )
+
+        self.assertIn(
+            "INVALID_RECENT_BLOCKHASH",
+            transition.reasons,
+        )
+
+        loaded = load_capital_reservation(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            loaded.status,
+            ACTIVE,
+        )
+
+    def test_invalid_signed_expiry_numbers_fail_closed(
+        self,
+    ):
+        result = self.reserve(
+            "MintInvalidExpiryNumbers"
+        )
+
+        cases = (
+            (
+                {
+                    "last_valid_block_height": True,
+                },
+                "INVALID_LAST_VALID_BLOCK_HEIGHT",
+            ),
+            (
+                {
+                    "blockhash_rpc_slot": True,
+                },
+                "INVALID_BLOCKHASH_RPC_SLOT",
+            ),
+        )
+
+        for updates, reason in cases:
+            with self.subTest(
+                reason=reason
+            ):
+                transition = self.bind_signed(
+                    reservation_id=(
+                        result.reservation
+                        .reservation_id
+                    ),
+                    transaction_signature=(
+                        "SignatureInvalidExpiry"
+                    ),
+                    **updates,
+                )
+
+                self.assertEqual(
+                    transition.status,
+                    "UNKNOWN",
+                )
+
+                self.assertIn(
+                    reason,
+                    transition.reasons,
+                )
+
+        loaded = load_capital_reservation(
+            reservation_id=(
+                result.reservation
+                .reservation_id
+            ),
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            loaded.status,
+            ACTIVE,
+        )
+
+    def test_signed_expiry_artifact_mismatch_blocks(
+        self,
+    ):
+        result = self.reserve(
+            "MintExpiryMismatch"
+        )
+
+        reservation_id = (
+            result.reservation
+            .reservation_id
+        )
+
+        first = self.bind_signed(
+            reservation_id=reservation_id,
+            transaction_signature=(
+                "SignatureExpiryMismatch"
+            ),
+        )
+
+        self.assertEqual(
+            first.status,
+            "PASS",
+        )
+
+        retry = self.bind_signed(
+            reservation_id=reservation_id,
+            transaction_signature=(
+                "SignatureExpiryMismatch"
+            ),
+            last_valid_block_height=(
+                self.last_valid_block_height
+                + 1
+            ),
+        )
+
+        self.assertEqual(
+            retry.status,
+            "BLOCK",
+        )
+
+        self.assertIn(
+            "SIGNED_TRANSACTION_ARTIFACT_MISMATCH",
+            retry.reasons,
+        )
+
+        self.assertFalse(
+            retry.changed
         )
 
     def test_signed_signature_mismatch_blocks(
@@ -1329,6 +1529,15 @@ class LiveReservationTests(unittest.TestCase):
                 signed_transaction_bytes=(
                     b"signed-transaction"
                 ),
+                recent_blockhash=(
+                    self.recent_blockhash
+                ),
+                last_valid_block_height=(
+                    self.last_valid_block_height
+                ),
+                blockhash_rpc_slot=(
+                    self.blockhash_rpc_slot
+                ),
                 db_path=self.db_path,
             )
         )
@@ -1366,7 +1575,7 @@ class LiveReservationTests(unittest.TestCase):
                 WHERE reservation_id = ?
                 """,
                 (
-                    "live-capital-reservation-v4",
+                    "live-capital-reservation-v5",
                     result.reservation
                     .reservation_id,
                 ),

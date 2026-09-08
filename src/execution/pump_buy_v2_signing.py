@@ -52,7 +52,7 @@ from src.portfolio.live_reservations import (
 
 
 PUMP_BUY_V2_SIGNING_VERSION = (
-    "pump-buy-v2-signing-v2"
+    "pump-buy-v2-signing-v3"
 )
 
 PASS = "PASS"
@@ -1101,8 +1101,8 @@ async def sign_and_bind_pump_buy_v2(
     #
     # The transaction now exists cryptographically,
     # but must not escape this function unless the
-    # exact artifact is durably bound to Reservation
-    # v5 first.
+    # exact artifact and its expiry provenance are
+    # durably bound to Reservation v6 first.
     #
     try:
         transition = (
@@ -1118,6 +1118,16 @@ async def sign_and_bind_pump_buy_v2(
                 ),
                 signed_transaction_bytes=(
                     candidate_transaction_bytes
+                ),
+                recent_blockhash=(
+                    message_plan.recent_blockhash
+                ),
+                last_valid_block_height=(
+                    message_plan
+                    .last_valid_block_height
+                ),
+                blockhash_rpc_slot=(
+                    message_plan.blockhash_rpc_slot
                 ),
                 db_path=db_path,
             )
@@ -1162,6 +1172,12 @@ async def sign_and_bind_pump_buy_v2(
         != candidate_transaction_sha256
         or persisted.signed_transaction_bytes
         != candidate_transaction_bytes
+        or persisted.recent_blockhash
+        != message_plan.recent_blockhash
+        or persisted.last_valid_block_height
+        != message_plan.last_valid_block_height
+        or persisted.blockhash_rpc_slot
+        != message_plan.blockhash_rpc_slot
         or persisted.signed_at is None
     ):
         return finish(

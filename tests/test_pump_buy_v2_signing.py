@@ -493,6 +493,21 @@ class PumpBuyV2SigningTests(
             signed_transaction_bytes=(
                 transaction_bytes
             ),
+            recent_blockhash=(
+                kwargs[
+                    "recent_blockhash"
+                ]
+            ),
+            last_valid_block_height=(
+                kwargs[
+                    "last_valid_block_height"
+                ]
+            ),
+            blockhash_rpc_slot=(
+                kwargs[
+                    "blockhash_rpc_slot"
+                ]
+            ),
         )
 
         return ReservationTransitionResult(

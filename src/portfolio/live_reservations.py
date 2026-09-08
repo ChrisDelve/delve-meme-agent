@@ -1035,6 +1035,77 @@ def load_capital_reservation(
         connection.close()
 
 
+def load_capital_reservation_read_only(
+    *,
+    reservation_id: str,
+    db_path: Path = DB_PATH,
+) -> LiveCapitalReservation | None:
+    """
+    Read one reservation without mutating the
+    live-capital ledger.
+
+    This loader intentionally performs:
+    - no schema migration
+    - no TTL expiration
+    - no reservation transition
+    - no write-capable database open
+
+    It is for observational recovery/status paths,
+    not capital-authority decisions.
+    """
+
+    reservation_id = reservation_id.strip()
+
+    if not reservation_id:
+        return None
+
+    if not db_path.exists():
+        return None
+
+    database_uri = (
+        db_path.resolve().as_uri()
+        + "?mode=ro"
+    )
+
+    connection = sqlite3.connect(
+        database_uri,
+        uri=True,
+        timeout=30.0,
+    )
+
+    connection.row_factory = sqlite3.Row
+
+    connection.execute(
+        "PRAGMA query_only = ON"
+    )
+
+    connection.execute(
+        "PRAGMA busy_timeout = 30000"
+    )
+
+    try:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_capital_reservations
+            WHERE reservation_id = ?
+            """,
+            (
+                reservation_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return _row_to_reservation(
+            row
+        )
+
+    finally:
+        connection.close()
+
+
 def bind_reservation_signed_transaction(
     *,
     reservation_id: str,

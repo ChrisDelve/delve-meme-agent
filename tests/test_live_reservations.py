@@ -18,6 +18,7 @@ from src.portfolio.live_reservations import (
     get_connection,
     init_schema,
     load_capital_reservation,
+    load_capital_reservation_read_only,
     bind_reservation_signed_transaction,
     release_active_reservation,
     reserve_pump_buy_capital,
@@ -896,6 +897,80 @@ class LiveReservationTests(unittest.TestCase):
             .base_available_cash_lamports,
         )
 
+
+    def test_read_only_snapshot_does_not_expire_active_reservation(
+        self,
+    ):
+        result = self.reserve(
+            "MintReadOnlySnapshot"
+        )
+
+        reservation_id = (
+            result.reservation
+            .reservation_id
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_capital_reservations
+                SET expires_at = ?
+                WHERE reservation_id = ?
+                """,
+                (
+                    0.0,
+                    reservation_id,
+                ),
+            )
+
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        snapshot = (
+            load_capital_reservation_read_only(
+                reservation_id=reservation_id,
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertIsNotNone(
+            snapshot
+        )
+
+        self.assertEqual(
+            snapshot.status,
+            ACTIVE,
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            row = connection.execute(
+                """
+                SELECT status
+                FROM live_capital_reservations
+                WHERE reservation_id = ?
+                """,
+                (
+                    reservation_id,
+                ),
+            ).fetchone()
+
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            row["status"],
+            ACTIVE,
+        )
 
     def test_bind_signed_transaction_is_idempotent(
         self,

@@ -44,6 +44,10 @@ LIVE_POSITION_RISK_TOTALS_VERSION = (
     "live-position-risk-totals-v1"
 )
 
+OPEN_LIVE_POSITIONS_VERSION = (
+    "open-live-positions-v1"
+)
+
 OPEN = "OPEN"
 
 RECONCILED_SUCCESSFUL_BUY_REASON = (
@@ -143,6 +147,21 @@ class LivePositionRiskTotalsResult:
 
     open_exposure_lamports: int | None
     open_positions: int | None
+
+
+@dataclass(frozen=True)
+class OpenLivePositionsResult:
+    loader_version: str
+
+    status: str
+    reasons: tuple[str, ...]
+
+    wallet_pubkey: str
+
+    positions: tuple[
+        LivePosition,
+        ...,
+    ] | None
 
 
 def _strict_nonnegative_int(
@@ -890,6 +909,254 @@ def load_live_position_risk_totals_read_only(
             ),
             open_positions=(
                 open_position_count
+            ),
+        )
+
+    finally:
+        connection.close()
+
+
+def load_open_live_positions_read_only(
+    *,
+    wallet_pubkey: str,
+    db_path: Path = DB_PATH,
+) -> OpenLivePositionsResult:
+    """
+    Load every authoritative OPEN live-position lot
+    for one exact wallet without mutating local state.
+
+    Results are ordered deterministically by
+    position_id.
+
+    Missing or unreadable live state is UNKNOWN,
+    never silently interpreted as an empty book.
+    """
+
+    normalized_wallet = ""
+
+    def finish(
+        status: str,
+        *reasons: str,
+        positions: (
+            tuple[
+                LivePosition,
+                ...,
+            ]
+            | None
+        ) = None,
+    ) -> OpenLivePositionsResult:
+        return OpenLivePositionsResult(
+            loader_version=(
+                OPEN_LIVE_POSITIONS_VERSION
+            ),
+            status=status,
+            reasons=tuple(reasons),
+            wallet_pubkey=normalized_wallet,
+            positions=positions,
+        )
+
+    if not isinstance(
+        wallet_pubkey,
+        str,
+    ):
+        return finish(
+            UNKNOWN,
+            "INVALID_WALLET_PUBKEY",
+        )
+
+    wallet_pubkey = (
+        wallet_pubkey.strip()
+    )
+
+    if not wallet_pubkey:
+        return finish(
+            UNKNOWN,
+            "INVALID_WALLET_PUBKEY",
+        )
+
+    try:
+        parsed_wallet = (
+            Pubkey.from_string(
+                wallet_pubkey
+            )
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "INVALID_WALLET_PUBKEY",
+        )
+
+    if parsed_wallet == Pubkey.default():
+        return finish(
+            UNKNOWN,
+            "INVALID_WALLET_PUBKEY",
+        )
+
+    normalized_wallet = str(
+        parsed_wallet
+    )
+
+    try:
+        database_exists = (
+            db_path.exists()
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_DATABASE_PATH_INVALID",
+        )
+
+    if not database_exists:
+        return finish(
+            UNKNOWN,
+            "LIVE_DATABASE_NOT_FOUND",
+        )
+
+    try:
+        database_uri = (
+            db_path.resolve().as_uri()
+            + "?mode=ro"
+        )
+
+        connection = sqlite3.connect(
+            database_uri,
+            uri=True,
+            timeout=30.0,
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_POSITION_READ_FAILED",
+        )
+
+    connection.row_factory = sqlite3.Row
+
+    try:
+        connection.execute(
+            "PRAGMA query_only = ON"
+        )
+
+        connection.execute(
+            "PRAGMA busy_timeout = 30000"
+        )
+
+        try:
+            rows = connection.execute(
+                """
+                SELECT *
+
+                FROM live_positions
+
+                WHERE wallet_pubkey = ?
+                  AND status = ?
+
+                ORDER BY position_id ASC
+                """,
+                (
+                    normalized_wallet,
+                    OPEN,
+                ),
+            ).fetchall()
+
+        except sqlite3.OperationalError as error:
+            if (
+                "no such table: live_positions"
+                in str(error)
+            ):
+                return finish(
+                    UNKNOWN,
+                    "LIVE_POSITIONS_TABLE_NOT_FOUND",
+                )
+
+            return finish(
+                UNKNOWN,
+                "LIVE_POSITION_READ_FAILED",
+            )
+
+        except sqlite3.Error:
+            return finish(
+                UNKNOWN,
+                "LIVE_POSITION_READ_FAILED",
+            )
+
+        positions: list[
+            LivePosition
+        ] = []
+
+        for row in rows:
+            if (
+                str(
+                    row["position_version"]
+                )
+                != LIVE_POSITION_VERSION
+            ):
+                return finish(
+                    UNKNOWN,
+                    "LIVE_POSITION_VERSION_MISMATCH",
+                )
+
+            try:
+                position = (
+                    _row_to_position(
+                        row
+                    )
+                )
+
+            except Exception:
+                return finish(
+                    UNKNOWN,
+                    "LIVE_POSITION_ROW_INVALID",
+                )
+
+            if (
+                position.position_version
+                != LIVE_POSITION_VERSION
+
+                or position.status
+                != OPEN
+
+                or position.wallet_pubkey
+                != normalized_wallet
+
+                or not _strict_nonnegative_int(
+                    position.tokens_held
+                )
+
+                or not _strict_nonnegative_int(
+                    position.remaining_exposure_lamports
+                )
+
+                or not _strict_nonnegative_int(
+                    position.remaining_cost_basis_lamports
+                )
+            ):
+                return finish(
+                    UNKNOWN,
+                    "LIVE_POSITION_ROW_INVALID",
+                )
+
+            #
+            # An OPEN lot with no inventory would be
+            # accounting-incoherent. Do not silently
+            # omit it from valuation.
+            #
+            if position.tokens_held <= 0:
+                return finish(
+                    UNKNOWN,
+                    "OPEN_POSITION_HAS_NO_TOKENS",
+                )
+
+            positions.append(
+                position
+            )
+
+        return finish(
+            PASS,
+            positions=tuple(
+                positions
             ),
         )
 

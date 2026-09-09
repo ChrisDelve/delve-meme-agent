@@ -12,6 +12,7 @@ from src.execution.successful_pump_buy_fill import (
 from src.portfolio.live_positions import (
     BLOCK,
     LIVE_POSITION_RISK_TOTALS_VERSION,
+    OPEN_LIVE_POSITIONS_VERSION,
     LIVE_POSITION_VERSION,
     OPEN,
     PASS,
@@ -20,6 +21,7 @@ from src.portfolio.live_positions import (
     init_schema as init_position_schema,
     load_live_position_read_only,
     load_live_position_risk_totals_read_only,
+    load_open_live_positions_read_only,
     record_successful_buy_and_open_position,
 )
 from src.portfolio.live_reservations import (
@@ -1879,6 +1881,525 @@ class LivePositionAccountingTests(
 
         self.assertIsNone(
             result.open_positions
+        )
+
+
+    def test_open_position_loader_missing_database_is_unknown(
+        self,
+    ):
+        missing_path = (
+            Path(
+                self.temp_dir.name
+            )
+            / "missing-open-positions.db"
+        )
+
+        result = (
+            load_open_live_positions_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=missing_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "LIVE_DATABASE_NOT_FOUND",
+            result.reasons,
+        )
+
+        self.assertIsNone(
+            result.positions
+        )
+
+        self.assertFalse(
+            missing_path.exists()
+        )
+
+    def test_open_position_loader_missing_table_is_unknown(
+        self,
+    ):
+        result = (
+            load_open_live_positions_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "LIVE_POSITIONS_TABLE_NOT_FOUND",
+            result.reasons,
+        )
+
+        self.assertIsNone(
+            result.positions
+        )
+
+    def test_open_position_loader_initialized_empty_book_passes(
+        self,
+    ):
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            init_position_schema(
+                connection
+            )
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        result = (
+            load_open_live_positions_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.loader_version,
+            OPEN_LIVE_POSITIONS_VERSION,
+        )
+
+        self.assertEqual(
+            result.status,
+            PASS,
+        )
+
+        self.assertEqual(
+            result.positions,
+            (),
+        )
+
+    def test_open_position_loader_returns_exact_open_lot(
+        self,
+    ):
+        transition = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            transition.status,
+            PASS,
+        )
+
+        result = (
+            load_open_live_positions_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            PASS,
+        )
+
+        self.assertIsNotNone(
+            result.positions
+        )
+
+        self.assertEqual(
+            len(result.positions),
+            1,
+        )
+
+        position = result.positions[0]
+
+        self.assertEqual(
+            position.reservation_id,
+            self.reservation_id,
+        )
+
+        self.assertEqual(
+            position.mint,
+            self.mint,
+        )
+
+        self.assertEqual(
+            position.tokens_held,
+            123_456_789,
+        )
+
+        self.assertEqual(
+            position.remaining_exposure_lamports,
+            1_000_000,
+        )
+
+    def test_open_position_loader_is_wallet_scoped(
+        self,
+    ):
+        first = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            first.status,
+            PASS,
+        )
+
+        other_wallet = (
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        )
+
+        second_reservation = (
+            "enumeration-other-wallet"
+        )
+
+        second_signature = (
+            "EnumerationOtherWalletSignature"
+        )
+
+        second_mint = (
+            "EnumerationOtherWalletMint"
+        )
+
+        self.insert_reservation(
+            reservation_id=(
+                second_reservation
+            ),
+            signature=(
+                second_signature
+            ),
+            mint=second_mint,
+            wallet_pubkey=(
+                other_wallet
+            ),
+        )
+
+        second = (
+            record_successful_buy_and_open_position(
+                **self.evidence(
+                    reservation_id=(
+                        second_reservation
+                    ),
+                    transaction_signature=(
+                        second_signature
+                    ),
+                    mint=second_mint,
+                    wallet_pubkey=(
+                        other_wallet
+                    ),
+                )
+            )
+        )
+
+        self.assertEqual(
+            second.status,
+            PASS,
+        )
+
+        primary = (
+            load_open_live_positions_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        alternate = (
+            load_open_live_positions_read_only(
+                wallet_pubkey=(
+                    other_wallet
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            len(primary.positions),
+            1,
+        )
+
+        self.assertEqual(
+            primary.positions[0].wallet_pubkey,
+            self.wallet_pubkey,
+        )
+
+        self.assertEqual(
+            len(alternate.positions),
+            1,
+        )
+
+        self.assertEqual(
+            alternate.positions[0].wallet_pubkey,
+            other_wallet,
+        )
+
+    def test_open_position_loader_excludes_closed_lots(
+        self,
+    ):
+        transition = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            transition.status,
+            PASS,
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_positions
+
+                SET
+                    status = 'CLOSED',
+                    tokens_held = 0,
+                    remaining_exposure_lamports = 0,
+                    remaining_cost_basis_lamports = 0
+
+                WHERE reservation_id = ?
+                """,
+                (
+                    self.reservation_id,
+                ),
+            )
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        result = (
+            load_open_live_positions_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            PASS,
+        )
+
+        self.assertEqual(
+            result.positions,
+            (),
+        )
+
+    def test_open_position_loader_orders_lots_by_position_id(
+        self,
+    ):
+        first = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            first.status,
+            PASS,
+        )
+
+        second_reservation = (
+            "enumeration-reservation-2"
+        )
+
+        second_signature = (
+            "EnumerationSignature2"
+        )
+
+        second_mint = (
+            "EnumerationMint2"
+        )
+
+        self.insert_reservation(
+            reservation_id=(
+                second_reservation
+            ),
+            signature=(
+                second_signature
+            ),
+            mint=second_mint,
+        )
+
+        second = (
+            record_successful_buy_and_open_position(
+                **self.evidence(
+                    reservation_id=(
+                        second_reservation
+                    ),
+                    transaction_signature=(
+                        second_signature
+                    ),
+                    mint=second_mint,
+                )
+            )
+        )
+
+        self.assertEqual(
+            second.status,
+            PASS,
+        )
+
+        result = (
+            load_open_live_positions_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        ids = [
+            position.position_id
+            for position in result.positions
+        ]
+
+        self.assertEqual(
+            ids,
+            sorted(ids),
+        )
+
+        self.assertEqual(
+            len(ids),
+            2,
+        )
+
+    def test_open_position_loader_unknown_version_fails_closed(
+        self,
+    ):
+        transition = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            transition.status,
+            PASS,
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_positions
+                SET position_version = ?
+                WHERE reservation_id = ?
+                """,
+                (
+                    "unknown-live-position-version",
+                    self.reservation_id,
+                ),
+            )
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        result = (
+            load_open_live_positions_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "LIVE_POSITION_VERSION_MISMATCH",
+            result.reasons,
+        )
+
+        self.assertIsNone(
+            result.positions
+        )
+
+    def test_open_position_loader_zero_token_open_lot_fails_closed(
+        self,
+    ):
+        transition = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            transition.status,
+            PASS,
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_positions
+                SET tokens_held = 0
+                WHERE reservation_id = ?
+                """,
+                (
+                    self.reservation_id,
+                ),
+            )
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        result = (
+            load_open_live_positions_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "OPEN_POSITION_HAS_NO_TOKENS",
+            result.reasons,
+        )
+
+        self.assertIsNone(
+            result.positions
         )
 
 if __name__ == "__main__":

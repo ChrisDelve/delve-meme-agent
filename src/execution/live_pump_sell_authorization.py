@@ -22,6 +22,9 @@ from src.execution.live_pump_fee_state import (
     LIVE_PUMP_FEE_STATE_VERSION,
     resolve_live_pump_fee_state,
 )
+from src.execution.order_authorization import (
+    WRAPPED_SOL_MINT,
+)
 from src.execution.pump_execution_simulator import (
     PumpCurveState,
 )
@@ -45,10 +48,16 @@ from src.portfolio.live_sell_allocation import (
 from src.safety.token_safety_gate import (
     SOL_QUOTE_MINT,
 )
+from src.safety.token_safety_resolver import (
+    TOKEN_2022_PROGRAM,
+    TOKEN_PROGRAM,
+    derive_associated_token_account,
+    derive_bonding_curve,
+)
 
 
 LIVE_PUMP_SELL_AUTHORIZATION_VERSION = (
-    "live-pump-sell-authorization-v1"
+    "live-pump-sell-authorization-v2"
 )
 
 AUTHORIZED = "AUTHORIZED"
@@ -67,6 +76,16 @@ class LivePumpSellAuthorization:
     wallet_pubkey: str
     mint: str
 
+    bonding_curve: str
+    base_token_program: str
+    associated_base_user: str
+
+    creator: str
+    mayhem_mode: bool
+
+    curve_quote_mint: str
+    quote_mint_for_instruction: str
+
     tokens_to_sell: int
 
     allocation: LiveSellAllocationPlan
@@ -74,8 +93,6 @@ class LivePumpSellAuthorization:
     fee_state_version: str
     fee_rpc_slot: int
     fee_fetched_at: float
-
-    quote_mint: str
 
     protocol_fee_bps: int
     creator_fee_bps: int
@@ -151,6 +168,13 @@ def _authorization_sha256(
     *,
     wallet_pubkey: str,
     mint: str,
+    bonding_curve: str,
+    base_token_program: str,
+    associated_base_user: str,
+    creator: str,
+    mayhem_mode: bool,
+    curve_quote_mint: str,
+    quote_mint_for_instruction: str,
     tokens_to_sell: int,
     allocation: LiveSellAllocationPlan,
     fee_rpc_slot: int,
@@ -174,6 +198,29 @@ def _authorization_sha256(
         ),
         "wallet_pubkey": wallet_pubkey,
         "mint": mint,
+
+        "construction_identity": {
+            "bonding_curve": (
+                bonding_curve
+            ),
+            "base_token_program": (
+                base_token_program
+            ),
+            "associated_base_user": (
+                associated_base_user
+            ),
+            "creator": creator,
+            "mayhem_mode": (
+                mayhem_mode
+            ),
+            "curve_quote_mint": (
+                curve_quote_mint
+            ),
+            "quote_mint_for_instruction": (
+                quote_mint_for_instruction
+            ),
+        },
+
         "tokens_to_sell": tokens_to_sell,
 
         "allocation": {
@@ -637,6 +684,139 @@ async def authorize_live_pump_sell(
             allocation=allocation,
         )
 
+    target_positions = tuple(
+        position
+        for position in positions
+        if position.mint
+        == normalized_mint
+    )
+
+    if not target_positions:
+        return finish(
+            UNKNOWN,
+            "AUTHORIZED_POSITION_SET_MISSING",
+            allocation=allocation,
+        )
+
+    token_program_values = {
+        position.base_token_program
+        for position
+        in target_positions
+    }
+
+    if len(token_program_values) != 1:
+        return finish(
+            UNKNOWN,
+            "POSITION_BASE_TOKEN_PROGRAM_MISMATCH",
+            allocation=allocation,
+        )
+
+    base_token_program_raw = next(
+        iter(
+            token_program_values
+        )
+    )
+
+    try:
+        base_token_program = (
+            Pubkey.from_string(
+                base_token_program_raw
+            )
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "POSITION_BASE_TOKEN_PROGRAM_INVALID",
+            allocation=allocation,
+        )
+
+    if base_token_program not in (
+        TOKEN_PROGRAM,
+        TOKEN_2022_PROGRAM,
+    ):
+        return finish(
+            UNKNOWN,
+            "POSITION_BASE_TOKEN_PROGRAM_UNSUPPORTED",
+            allocation=allocation,
+        )
+
+    associated_base_user_values = {
+        position.associated_base_user
+        for position
+        in target_positions
+    }
+
+    if (
+        len(
+            associated_base_user_values
+        )
+        != 1
+    ):
+        return finish(
+            UNKNOWN,
+            "POSITION_ASSOCIATED_BASE_USER_MISMATCH",
+            allocation=allocation,
+        )
+
+    associated_base_user_raw = next(
+        iter(
+            associated_base_user_values
+        )
+    )
+
+    try:
+        associated_base_user = (
+            Pubkey.from_string(
+                associated_base_user_raw
+            )
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "POSITION_ASSOCIATED_BASE_USER_INVALID",
+            allocation=allocation,
+        )
+
+    expected_associated_base_user = (
+        derive_associated_token_account(
+            owner=parsed_wallet,
+            mint=parsed_mint,
+            token_program=(
+                base_token_program
+            ),
+        )
+    )
+
+    if (
+        associated_base_user
+        != expected_associated_base_user
+    ):
+        return finish(
+            UNKNOWN,
+            "POSITION_ASSOCIATED_BASE_USER_DERIVATION_MISMATCH",
+            allocation=allocation,
+        )
+
+    position_quote_mints = {
+        position.quote_mint
+        for position
+        in target_positions
+    }
+
+    if (
+        position_quote_mints
+        != {
+            WRAPPED_SOL_MINT
+        }
+    ):
+        return finish(
+            UNKNOWN,
+            "POSITION_QUOTE_MINT_UNSUPPORTED",
+            allocation=allocation,
+        )
+
     # --------------------------------------------------------
     # Live Pump curve + fee authority.
     # --------------------------------------------------------
@@ -738,10 +918,88 @@ async def authorize_live_pump_sell(
             allocation=allocation,
         )
 
-    normalized_quote_mint = (
+    normalized_curve_quote_mint = (
         SOL_QUOTE_MINT
         if quote_mint is None
         else str(quote_mint)
+    )
+
+    curve_address_raw = getattr(
+        curve,
+        "address",
+        None,
+    )
+
+    try:
+        curve_address = (
+            Pubkey.from_string(
+                curve_address_raw
+            )
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_BONDING_CURVE_ADDRESS_INVALID",
+            allocation=allocation,
+        )
+
+    expected_curve = (
+        derive_bonding_curve(
+            parsed_mint
+        )
+    )
+
+    if curve_address != expected_curve:
+        return finish(
+            UNKNOWN,
+            "LIVE_BONDING_CURVE_ADDRESS_MISMATCH",
+            allocation=allocation,
+        )
+
+    creator_raw = getattr(
+        curve,
+        "creator",
+        None,
+    )
+
+    try:
+        creator = Pubkey.from_string(
+            creator_raw
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_CURVE_CREATOR_INVALID",
+            allocation=allocation,
+        )
+
+    if creator == Pubkey.default():
+        return finish(
+            UNKNOWN,
+            "LIVE_CURVE_CREATOR_INVALID",
+            allocation=allocation,
+        )
+
+    mayhem_mode = getattr(
+        curve,
+        "is_mayhem_mode",
+        None,
+    )
+
+    if not isinstance(
+        mayhem_mode,
+        bool,
+    ):
+        return finish(
+            UNKNOWN,
+            "LIVE_CURVE_MAYHEM_MODE_INVALID",
+            allocation=allocation,
+        )
+
+    quote_mint_for_instruction = (
+        WRAPPED_SOL_MINT
     )
 
     protocol_fee_bps = getattr(
@@ -1089,6 +1347,27 @@ async def authorize_live_pump_sell(
                     normalized_wallet
                 ),
                 mint=normalized_mint,
+                bonding_curve=str(
+                    curve_address
+                ),
+                base_token_program=str(
+                    base_token_program
+                ),
+                associated_base_user=str(
+                    associated_base_user
+                ),
+                creator=str(
+                    creator
+                ),
+                mayhem_mode=(
+                    mayhem_mode
+                ),
+                curve_quote_mint=(
+                    normalized_curve_quote_mint
+                ),
+                quote_mint_for_instruction=(
+                    quote_mint_for_instruction
+                ),
                 tokens_to_sell=(
                     tokens_to_sell
                 ),
@@ -1097,7 +1376,7 @@ async def authorize_live_pump_sell(
                     fee_rpc_slot
                 ),
                 quote_mint=(
-                    normalized_quote_mint
+                    normalized_curve_quote_mint
                 ),
                 protocol_fee_bps=int(
                     protocol_fee_bps
@@ -1142,6 +1421,31 @@ async def authorize_live_pump_sell(
                 normalized_wallet
             ),
             mint=normalized_mint,
+
+            bonding_curve=str(
+                curve_address
+            ),
+            base_token_program=str(
+                base_token_program
+            ),
+            associated_base_user=str(
+                associated_base_user
+            ),
+
+            creator=str(
+                creator
+            ),
+            mayhem_mode=(
+                mayhem_mode
+            ),
+
+            curve_quote_mint=(
+                normalized_curve_quote_mint
+            ),
+            quote_mint_for_instruction=(
+                quote_mint_for_instruction
+            ),
+
             tokens_to_sell=(
                 tokens_to_sell
             ),
@@ -1154,9 +1458,6 @@ async def authorize_live_pump_sell(
             ),
             fee_fetched_at=float(
                 fee_fetched_at
-            ),
-            quote_mint=(
-                normalized_quote_mint
             ),
             protocol_fee_bps=int(
                 protocol_fee_bps

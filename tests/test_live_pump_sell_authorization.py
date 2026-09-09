@@ -12,6 +12,9 @@ from solders.pubkey import Pubkey
 from src.execution.live_pump_fee_state import (
     LIVE_PUMP_FEE_STATE_VERSION,
 )
+from src.execution.order_authorization import (
+    WRAPPED_SOL_MINT,
+)
 from src.execution.live_pump_sell_authorization import (
     AUTHORIZED,
     BLOCK,
@@ -27,6 +30,11 @@ from src.portfolio.live_positions import (
 )
 from src.safety.token_safety_gate import (
     SOL_QUOTE_MINT,
+)
+from src.safety.token_safety_resolver import (
+    TOKEN_2022_PROGRAM,
+    derive_associated_token_account,
+    derive_bonding_curve,
 )
 
 
@@ -49,6 +57,36 @@ class LivePumpSellAuthorizationTests(
 
         self.other_mint = str(
             Pubkey.new_unique()
+        )
+
+        self.creator = (
+            Pubkey.new_unique()
+        )
+
+        self.curve = (
+            derive_bonding_curve(
+                Pubkey.from_string(
+                    self.mint
+                )
+            )
+        )
+
+        self.base_token_program = (
+            TOKEN_2022_PROGRAM
+        )
+
+        self.associated_base_user = (
+            derive_associated_token_account(
+                owner=Pubkey.from_string(
+                    self.wallet
+                ),
+                mint=Pubkey.from_string(
+                    self.mint
+                ),
+                token_program=(
+                    self.base_token_program
+                ),
+            )
         )
 
     def position(
@@ -95,13 +133,13 @@ class LivePumpSellAuthorizationTests(
             entry_slot=entry_slot,
             entry_block_time=100,
             base_token_program=str(
-                Pubkey.new_unique()
+                self.base_token_program
             ),
             associated_base_user=str(
-                Pubkey.new_unique()
+                self.associated_base_user
             ),
             quote_mint=(
-                "11111111111111111111111111111111"
+                WRAPPED_SOL_MINT
             ),
             authorized_token_amount=tokens,
             trade_event_token_amount=tokens,
@@ -200,6 +238,13 @@ class LivePumpSellAuthorizationTests(
             ),
             complete=complete,
             quote_mint=quote_mint,
+            address=str(
+                self.curve
+            ),
+            creator=str(
+                self.creator
+            ),
+            is_mayhem_mode=False,
         )
 
         return SimpleNamespace(
@@ -603,6 +648,96 @@ class LivePumpSellAuthorizationTests(
                     result.reasons,
                 )
 
+
+    async def test_position_construction_identity_is_bound(
+        self,
+    ):
+        base = self.position(
+            position_id=1,
+            entry_slot=100,
+            tokens=1_000_000_000,
+        )
+
+        cases = (
+            (
+                replace(
+                    base,
+                    associated_base_user=str(
+                        Pubkey.new_unique()
+                    ),
+                ),
+                "POSITION_ASSOCIATED_BASE_USER_DERIVATION_MISMATCH",
+            ),
+            (
+                replace(
+                    base,
+                    quote_mint=str(
+                        Pubkey.new_unique()
+                    ),
+                ),
+                "POSITION_QUOTE_MINT_UNSUPPORTED",
+            ),
+        )
+
+        for corrupted, reason in cases:
+            with self.subTest(
+                reason=reason
+            ):
+                snapshot = (
+                    self.positions_result(
+                        (
+                            corrupted,
+                        )
+                    )
+                )
+
+                (
+                    result,
+                    _,
+                    fee,
+                ) = await self.resolve(
+                    position_results=[
+                        snapshot,
+                    ],
+                )
+
+                self.assertEqual(
+                    result.status,
+                    UNKNOWN,
+                )
+
+                self.assertIn(
+                    reason,
+                    result.reasons,
+                )
+
+                fee.assert_not_awaited()
+
+    async def test_curve_construction_identity_is_bound(
+        self,
+    ):
+        state = self.fee_state()
+
+        state.curve.address = str(
+            Pubkey.new_unique()
+        )
+
+        result = (
+            await self.resolve(
+                fee_state=state
+            )
+        )[0]
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "LIVE_BONDING_CURVE_ADDRESS_MISMATCH",
+            result.reasons,
+        )
+
     async def test_graduated_curve_is_unknown(
         self,
     ):
@@ -745,8 +880,46 @@ class LivePumpSellAuthorizationTests(
         )
 
         self.assertEqual(
-            authorization.quote_mint,
+            authorization.curve_quote_mint,
             SOL_QUOTE_MINT,
+        )
+
+        self.assertEqual(
+            authorization
+            .quote_mint_for_instruction,
+            WRAPPED_SOL_MINT,
+        )
+
+        self.assertEqual(
+            authorization.bonding_curve,
+            str(
+                self.curve
+            ),
+        )
+
+        self.assertEqual(
+            authorization.base_token_program,
+            str(
+                self.base_token_program
+            ),
+        )
+
+        self.assertEqual(
+            authorization.associated_base_user,
+            str(
+                self.associated_base_user
+            ),
+        )
+
+        self.assertEqual(
+            authorization.creator,
+            str(
+                self.creator
+            ),
+        )
+
+        self.assertFalse(
+            authorization.mayhem_mode
         )
 
         self.assertTrue(
@@ -975,7 +1148,7 @@ class LivePumpSellAuthorizationTests(
 
         self.assertEqual(
             LIVE_PUMP_SELL_AUTHORIZATION_VERSION,
-            "live-pump-sell-authorization-v1",
+            "live-pump-sell-authorization-v2",
         )
 
 

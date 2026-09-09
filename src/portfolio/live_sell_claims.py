@@ -38,6 +38,10 @@ LIVE_SELL_INVENTORY_CLAIM_VERSION = (
     "live-sell-inventory-claim-v1"
 )
 
+ACTIVE_LIVE_SELL_INVENTORY_CLAIM_LOADER_VERSION = (
+    "active-live-sell-inventory-claim-loader-v1"
+)
+
 ACTIVE = "ACTIVE"
 RELEASED = "RELEASED"
 CONSUMED = "CONSUMED"
@@ -81,6 +85,20 @@ class LiveSellInventoryClaimResult:
     claim: LiveSellInventoryClaim | None
 
     changed: bool
+
+
+
+@dataclass(frozen=True)
+class ActiveLiveSellInventoryClaimResult:
+    loader_version: str
+
+    status: str
+    reasons: tuple[str, ...]
+
+    authorization_sha256: str
+
+    claim: LiveSellInventoryClaim | None
+
 
 
 def _strict_nonnegative_sqlite_int(
@@ -581,6 +599,43 @@ def _allocation_is_persistable(
     return True
 
 
+def _authorization_contract_valid(
+    authorization: LivePumpSellAuthorization,
+) -> bool:
+    return (
+        authorization.authorization_version
+        == LIVE_PUMP_SELL_AUTHORIZATION_VERSION
+        and _valid_sha256(
+            authorization.authorization_sha256
+        )
+        and _authorization_fingerprint_matches(
+            authorization
+        )
+        and _valid_pubkey(
+            authorization.wallet_pubkey
+        )
+        and _valid_pubkey(
+            authorization.mint
+        )
+        and _strict_positive_sqlite_int(
+            authorization.tokens_to_sell
+        )
+        and isinstance(
+            authorization.allocation,
+            LiveSellAllocationPlan,
+        )
+        and _allocation_is_persistable(
+            authorization.allocation
+        )
+        and authorization.allocation.wallet_pubkey
+        == authorization.wallet_pubkey
+        and authorization.allocation.mint
+        == authorization.mint
+        and authorization.allocation.requested_tokens
+        == authorization.tokens_to_sell
+    )
+
+
 def _load_open_positions_in_transaction(
     *,
     connection: sqlite3.Connection,
@@ -882,7 +937,7 @@ def _load_claim(
     )
 
 
-def _claim_matches_authorization(
+def _claim_identity_matches_authorization(
     *,
     claim: LiveSellInventoryClaim,
     authorization: LivePumpSellAuthorization,
@@ -902,14 +957,272 @@ def _claim_matches_authorization(
         == authorization.tokens_to_sell
         and claim.allocation
         == authorization.allocation
-        and claim.status
-        == ACTIVE
+    )
+
+
+def _claim_matches_authorization(
+    *,
+    claim: LiveSellInventoryClaim,
+    authorization: LivePumpSellAuthorization,
+) -> bool:
+    return (
+        _claim_identity_matches_authorization(
+            claim=claim,
+            authorization=authorization,
+        )
+        and claim.status == ACTIVE
         and _strict_timestamp(
             claim.claimed_at
         )
         and claim.terminal_at is None
         and claim.terminal_reason is None
     )
+
+
+def load_active_live_sell_inventory_claim_read_only(
+    *,
+    authorization: LivePumpSellAuthorization,
+    db_path: Path = DB_PATH,
+) -> ActiveLiveSellInventoryClaimResult:
+    """
+    Load and validate the exact durable ACTIVE
+    inventory claim for one SELL authorization.
+
+    This function is strictly read-only. It never
+    initializes schema, acquires inventory, releases
+    inventory, or mutates live-position state.
+    """
+
+    authorization_sha256 = ""
+
+    def finish(
+        status: str,
+        *reasons: str,
+        claim: (
+            LiveSellInventoryClaim
+            | None
+        ) = None,
+    ) -> ActiveLiveSellInventoryClaimResult:
+        return ActiveLiveSellInventoryClaimResult(
+            loader_version=(
+                ACTIVE_LIVE_SELL_INVENTORY_CLAIM_LOADER_VERSION
+            ),
+            status=status,
+            reasons=tuple(reasons),
+            authorization_sha256=(
+                authorization_sha256
+            ),
+            claim=claim,
+        )
+
+    if not isinstance(
+        authorization,
+        LivePumpSellAuthorization,
+    ):
+        return finish(
+            UNKNOWN,
+            "INVALID_SELL_AUTHORIZATION",
+        )
+
+    authorization_sha256 = (
+        authorization.authorization_sha256
+    )
+
+    if not _authorization_contract_valid(
+        authorization
+    ):
+        return finish(
+            UNKNOWN,
+            "SELL_AUTHORIZATION_CONTRACT_INVALID",
+        )
+
+    try:
+        database_exists = (
+            db_path.exists()
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_DATABASE_PATH_INVALID",
+        )
+
+    if not database_exists:
+        return finish(
+            UNKNOWN,
+            "LIVE_DATABASE_NOT_FOUND",
+        )
+
+    try:
+        database_uri = (
+            db_path.resolve().as_uri()
+            + "?mode=ro"
+        )
+
+        connection = sqlite3.connect(
+            database_uri,
+            uri=True,
+            timeout=30.0,
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "SELL_CLAIM_READ_FAILED",
+        )
+
+    connection.row_factory = sqlite3.Row
+
+    try:
+        connection.execute(
+            "PRAGMA query_only = ON"
+        )
+
+        connection.execute(
+            "PRAGMA busy_timeout = 30000"
+        )
+
+        try:
+            claim = _load_claim(
+                connection=connection,
+                authorization_sha256=(
+                    authorization_sha256
+                ),
+            )
+
+            active_rows = (
+                connection.execute(
+                    """
+                    SELECT authorization_sha256
+
+                    FROM live_sell_inventory_claims
+
+                    WHERE wallet_pubkey = ?
+                      AND mint = ?
+                      AND status = ?
+
+                    ORDER BY authorization_sha256 ASC
+                    """,
+                    (
+                        authorization.wallet_pubkey,
+                        authorization.mint,
+                        ACTIVE,
+                    ),
+                ).fetchall()
+            )
+
+        except sqlite3.OperationalError as error:
+            error_text = str(
+                error
+            )
+
+            if (
+                "no such table: live_sell_inventory_claims"
+                in error_text
+                or
+                "no such table: live_sell_inventory_claim_lots"
+                in error_text
+            ):
+                return finish(
+                    UNKNOWN,
+                    "LIVE_SELL_CLAIM_TABLE_NOT_FOUND",
+                )
+
+            return finish(
+                UNKNOWN,
+                "SELL_CLAIM_READ_FAILED",
+            )
+
+        except sqlite3.Error:
+            return finish(
+                UNKNOWN,
+                "SELL_CLAIM_READ_FAILED",
+            )
+
+        except Exception:
+            return finish(
+                UNKNOWN,
+                "SELL_CLAIM_ROW_INVALID",
+            )
+
+        if len(active_rows) > 1:
+            return finish(
+                UNKNOWN,
+                "MULTIPLE_ACTIVE_SELL_CLAIMS",
+            )
+
+        if claim is None:
+            if active_rows:
+                return finish(
+                    BLOCK,
+                    "ACTIVE_SELL_CLAIM_AUTHORIZATION_MISMATCH",
+                )
+
+            return finish(
+                BLOCK,
+                "ACTIVE_SELL_CLAIM_NOT_FOUND",
+            )
+
+        if not _claim_identity_matches_authorization(
+            claim=claim,
+            authorization=authorization,
+        ):
+            return finish(
+                UNKNOWN,
+                "SELL_CLAIM_EVIDENCE_MISMATCH",
+                claim=claim,
+            )
+
+        if claim.status != ACTIVE:
+            return finish(
+                BLOCK,
+                "SELL_CLAIM_NOT_ACTIVE",
+                claim=claim,
+            )
+
+        if (
+            not _strict_timestamp(
+                claim.claimed_at
+            )
+            or claim.terminal_at is not None
+            or claim.terminal_reason is not None
+        ):
+            return finish(
+                UNKNOWN,
+                "ACTIVE_SELL_CLAIM_STATE_INCOHERENT",
+                claim=claim,
+            )
+
+        if len(active_rows) != 1:
+            return finish(
+                UNKNOWN,
+                "ACTIVE_SELL_CLAIM_INDEX_INCOHERENT",
+                claim=claim,
+            )
+
+        active_authorization_sha256 = str(
+            active_rows[0][
+                "authorization_sha256"
+            ]
+        )
+
+        if (
+            active_authorization_sha256
+            != authorization_sha256
+        ):
+            return finish(
+                UNKNOWN,
+                "ACTIVE_SELL_CLAIM_INDEX_INCOHERENT",
+                claim=claim,
+            )
+
+        return finish(
+            PASS,
+            claim=claim,
+        )
+
+    finally:
+        connection.close()
 
 
 def acquire_live_sell_inventory_claim(
@@ -954,37 +1267,8 @@ def acquire_live_sell_inventory_claim(
         authorization.authorization_sha256
     )
 
-    if (
-        authorization.authorization_version
-        != LIVE_PUMP_SELL_AUTHORIZATION_VERSION
-        or not _valid_sha256(
-            authorization_sha256
-        )
-        or not _authorization_fingerprint_matches(
-            authorization
-        )
-        or not _valid_pubkey(
-            authorization.wallet_pubkey
-        )
-        or not _valid_pubkey(
-            authorization.mint
-        )
-        or not _strict_positive_sqlite_int(
-            authorization.tokens_to_sell
-        )
-        or not isinstance(
-            authorization.allocation,
-            LiveSellAllocationPlan,
-        )
-        or not _allocation_is_persistable(
-            authorization.allocation
-        )
-        or authorization.allocation.wallet_pubkey
-        != authorization.wallet_pubkey
-        or authorization.allocation.mint
-        != authorization.mint
-        or authorization.allocation.requested_tokens
-        != authorization.tokens_to_sell
+    if not _authorization_contract_valid(
+        authorization
     ):
         return finish(
             UNKNOWN,

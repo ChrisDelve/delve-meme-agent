@@ -31,11 +31,15 @@ from src.portfolio.live_sell_allocation import (
 )
 from src.portfolio.live_sell_claims import (
     ACTIVE,
+    ACTIVE_LIVE_SELL_INVENTORY_CLAIM_LOADER_VERSION,
     BLOCK,
     LIVE_SELL_INVENTORY_CLAIM_VERSION,
     PASS,
+    RELEASED,
     UNKNOWN,
     acquire_live_sell_inventory_claim,
+    init_schema as init_claim_schema,
+    load_active_live_sell_inventory_claim_read_only,
 )
 from src.safety.token_safety_gate import (
     SOL_QUOTE_MINT,
@@ -694,6 +698,217 @@ class LiveSellInventoryClaimTests(
         self.assertEqual(
             claim_tables,
             0,
+        )
+
+    def test_read_only_loader_returns_exact_active_claim(
+        self,
+    ):
+        authorization = self.authorization()
+
+        acquired = acquire_live_sell_inventory_claim(
+            authorization=authorization,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            acquired.status,
+            PASS,
+        )
+
+        result = load_active_live_sell_inventory_claim_read_only(
+            authorization=authorization,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            result.loader_version,
+            ACTIVE_LIVE_SELL_INVENTORY_CLAIM_LOADER_VERSION,
+        )
+        self.assertEqual(
+            result.status,
+            PASS,
+        )
+        self.assertEqual(
+            result.reasons,
+            (),
+        )
+        self.assertEqual(
+            result.claim,
+            acquired.claim,
+        )
+
+    def test_read_only_loader_missing_database_is_unknown_without_creation(
+        self,
+    ):
+        authorization = self.authorization()
+
+        self.db_path.unlink()
+
+        result = load_active_live_sell_inventory_claim_read_only(
+            authorization=authorization,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_DATABASE_NOT_FOUND",
+            ),
+        )
+        self.assertFalse(
+            self.db_path.exists()
+        )
+
+    def test_read_only_loader_missing_claim_table_is_unknown(
+        self,
+    ):
+        authorization = self.authorization()
+
+        result = load_active_live_sell_inventory_claim_read_only(
+            authorization=authorization,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_SELL_CLAIM_TABLE_NOT_FOUND",
+            ),
+        )
+
+    def test_read_only_loader_initialized_but_unclaimed_is_block(
+        self,
+    ):
+        authorization = self.authorization()
+
+        connection = sqlite3.connect(
+            self.db_path
+        )
+
+        try:
+            init_claim_schema(
+                connection
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = load_active_live_sell_inventory_claim_read_only(
+            authorization=authorization,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            result.status,
+            BLOCK,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "ACTIVE_SELL_CLAIM_NOT_FOUND",
+            ),
+        )
+
+    def test_read_only_loader_rejects_other_active_authorization(
+        self,
+    ):
+        authorization_a = self.authorization(
+            slippage_bps=500
+        )
+        authorization_b = self.authorization(
+            slippage_bps=600
+        )
+
+        acquired = acquire_live_sell_inventory_claim(
+            authorization=authorization_a,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            acquired.status,
+            PASS,
+        )
+
+        result = load_active_live_sell_inventory_claim_read_only(
+            authorization=authorization_b,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            result.status,
+            BLOCK,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "ACTIVE_SELL_CLAIM_AUTHORIZATION_MISMATCH",
+            ),
+        )
+
+    def test_read_only_loader_rejects_terminal_claim(
+        self,
+    ):
+        authorization = self.authorization()
+
+        acquired = acquire_live_sell_inventory_claim(
+            authorization=authorization,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            acquired.status,
+            PASS,
+        )
+
+        connection = sqlite3.connect(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_sell_inventory_claims
+
+                SET
+                    status = ?,
+                    terminal_at = ?,
+                    terminal_reason = ?
+
+                WHERE authorization_sha256 = ?
+                """,
+                (
+                    RELEASED,
+                    200.0,
+                    "TEST_TERMINAL",
+                    authorization.authorization_sha256,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = load_active_live_sell_inventory_claim_read_only(
+            authorization=authorization,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(
+            result.status,
+            BLOCK,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "SELL_CLAIM_NOT_ACTIVE",
+            ),
         )
 
     def test_tampered_authorization_fingerprint_fails_closed(

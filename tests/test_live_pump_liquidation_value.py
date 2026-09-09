@@ -503,6 +503,43 @@ class LivePumpLiquidationValueTests(
             stale.reasons,
         )
 
+
+    async def test_missing_curve_state_is_unknown(
+        self,
+    ):
+        fee_state = self.fee_state()
+        fee_state.curve = None
+
+        (
+            result,
+            _,
+            helper,
+            normalize,
+        ) = await self.resolve(
+            fee_state=fee_state,
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "LIVE_CURVE_STATE_MISSING",
+            result.reasons,
+        )
+
+        self.assertIsNone(
+            result.quote_mint
+        )
+
+        self.assertIsNone(
+            result.liquidation_value_lamports
+        )
+
+        helper.assert_not_called()
+        normalize.assert_not_called()
+
     async def test_graduated_curve_is_unknown_not_zero(
         self,
     ):

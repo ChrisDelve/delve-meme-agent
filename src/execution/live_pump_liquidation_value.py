@@ -361,6 +361,8 @@ async def resolve_live_pump_inventory_liquidation_value(
         None,
     )
 
+    quote_mint = None
+
     if (
         fee_state_version
         != LIVE_PUMP_FEE_STATE_VERSION

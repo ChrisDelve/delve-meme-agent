@@ -84,6 +84,11 @@ class LiveSellExecutionRecord:
     blockhash_rpc_slot: int
 
     signed_at: float
+
+    submission_started_at: float | None
+    submission_attempt_count: int
+    submitted_at: float | None
+
     updated_at: float
 
 
@@ -287,16 +292,105 @@ def init_schema(
             signed_at
                 REAL NOT NULL,
 
+            submission_started_at
+                REAL,
+
+            submission_attempt_count
+                INTEGER NOT NULL
+                DEFAULT 0
+                CHECK (
+                    submission_attempt_count >= 0
+                ),
+
+            submitted_at
+                REAL,
+
             updated_at
                 REAL NOT NULL
         )
         """
     )
+    #
+    # Additive v1 schema migration.
+    #
+    # The execution-state CHECK already reserved
+    # SUBMISSION_ARMED and SUBMITTED when v1 was
+    # introduced. Older v1 databases may therefore
+    # only be missing these metadata columns.
+    #
+    schema_columns = {
+        str(
+            row["name"]
+        )
+        for row in connection.execute(
+            """
+            PRAGMA table_info(
+                live_sell_execution_records
+            )
+            """
+        ).fetchall()
+    }
+
+    if (
+        "submission_started_at"
+        not in schema_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE
+                live_sell_execution_records
+            ADD COLUMN
+                submission_started_at REAL
+            """
+        )
+
+    if (
+        "submission_attempt_count"
+        not in schema_columns
+    ):
+        connection.execute(
+            """
+            ALTER TABLE
+                live_sell_execution_records
+            ADD COLUMN
+                submission_attempt_count
+                INTEGER NOT NULL
+                DEFAULT 0
+                CHECK (
+                    submission_attempt_count >= 0
+                )
+            """
+        )
+
+    if "submitted_at" not in schema_columns:
+        connection.execute(
+            """
+            ALTER TABLE
+                live_sell_execution_records
+            ADD COLUMN
+                submitted_at REAL
+            """
+        )
+
 
 
 def _row_to_record(
     row: sqlite3.Row,
 ) -> LiveSellExecutionRecord:
+    #
+    # Legacy v1 rows created before the durable
+    # submission boundary do not have submission
+    # metadata columns. They represent a pristine
+    # SIGNED state:
+    #
+    #   started_at = None
+    #   attempt_count = 0
+    #   submitted_at = None
+    #
+    row_keys = set(
+        row.keys()
+    )
+
     return LiveSellExecutionRecord(
         record_version=str(
             row["record_version"]
@@ -354,10 +448,111 @@ def _row_to_record(
         signed_at=float(
             row["signed_at"]
         ),
+        submission_started_at=(
+            None
+            if (
+                "submission_started_at"
+                not in row_keys
+                or row[
+                    "submission_started_at"
+                ]
+                is None
+            )
+            else float(
+                row[
+                    "submission_started_at"
+                ]
+            )
+        ),
+        submission_attempt_count=(
+            0
+            if (
+                "submission_attempt_count"
+                not in row_keys
+            )
+            else int(
+                row[
+                    "submission_attempt_count"
+                ]
+            )
+        ),
+        submitted_at=(
+            None
+            if (
+                "submitted_at"
+                not in row_keys
+                or row["submitted_at"]
+                is None
+            )
+            else float(
+                row["submitted_at"]
+            )
+        ),
         updated_at=float(
             row["updated_at"]
         ),
     )
+
+
+def _submission_metadata_coherent(
+    record: LiveSellExecutionRecord,
+) -> bool:
+    if (
+        not isinstance(
+            record.submission_attempt_count,
+            int,
+        )
+        or isinstance(
+            record.submission_attempt_count,
+            bool,
+        )
+        or record.submission_attempt_count < 0
+    ):
+        return False
+
+    if record.status == SIGNED:
+        return (
+            record.submission_started_at
+            is None
+            and record
+            .submission_attempt_count
+            == 0
+            and record.submitted_at
+            is None
+        )
+
+    if record.status == SUBMISSION_ARMED:
+        return (
+            _strict_timestamp(
+                record.submission_started_at
+            )
+            and record
+            .submission_attempt_count
+            == 1
+            and record.submitted_at
+            is None
+            and record.updated_at
+            >= record.submission_started_at
+        )
+
+    if record.status == SUBMITTED:
+        return (
+            _strict_timestamp(
+                record.submission_started_at
+            )
+            and record
+            .submission_attempt_count
+            == 1
+            and _strict_timestamp(
+                record.submitted_at
+            )
+            and record.submitted_at
+            >= record.submission_started_at
+            and record.updated_at
+            >= record.submitted_at
+        )
+
+    return False
 
 
 def _record_contract_valid(
@@ -424,6 +619,11 @@ def _record_contract_valid(
         )
         or record.updated_at
         < record.signed_at
+    ):
+        return False
+
+    if not _submission_metadata_coherent(
+        record
     ):
         return False
 
@@ -1894,4 +2094,856 @@ def bind_live_sell_signed_artifact(
         PASS,
         record=persisted,
         changed=changed,
+    )
+
+
+def _record_matches_submission_authority(
+    *,
+    record: LiveSellExecutionRecord,
+    authorization: LivePumpSellAuthorization,
+    transaction_signature: str,
+    signed_transaction_sha256: str,
+) -> bool:
+    return (
+        record.record_version
+        == LIVE_SELL_EXECUTION_RECORD_VERSION
+        and record.authorization_version
+        == authorization.authorization_version
+        and record.authorization_sha256
+        == authorization.authorization_sha256
+        and record.wallet_pubkey
+        == authorization.wallet_pubkey
+        and record.mint
+        == authorization.mint
+        and record.tokens_to_sell
+        == authorization.tokens_to_sell
+        and record.transaction_signature
+        == transaction_signature
+        and record.signed_transaction_sha256
+        == signed_transaction_sha256
+    )
+
+
+def _active_claim_matches_submission_authority(
+    *,
+    claim: Any,
+    authorization: LivePumpSellAuthorization,
+) -> bool:
+    return (
+        claim is not None
+        and claim.status
+        == CLAIM_ACTIVE
+        and claim.authorization_version
+        == authorization.authorization_version
+        and claim.authorization_sha256
+        == authorization.authorization_sha256
+        and claim.wallet_pubkey
+        == authorization.wallet_pubkey
+        and claim.mint
+        == authorization.mint
+        and claim.tokens_to_sell
+        == authorization.tokens_to_sell
+        and claim.allocation
+        == authorization.allocation
+        and claim.terminal_at
+        is None
+        and claim.terminal_reason
+        is None
+    )
+
+
+def arm_live_sell_submission(
+    *,
+    authorization: LivePumpSellAuthorization,
+    transaction_signature: str,
+    signed_transaction_sha256: str,
+    db_path: Path = DB_PATH,
+) -> LiveSellExecutionRecordResult:
+    """
+    Atomically grant exactly one broadcast attempt
+    for an exact durably SIGNED SELL artifact.
+
+    This function performs no network I/O.
+
+    Once SUBMISSION_ARMED is durable, a second caller
+    cannot independently obtain broadcast authority.
+    """
+
+    authorization_sha256 = ""
+
+    def finish(
+        status: str,
+        *reasons: str,
+        record: (
+            LiveSellExecutionRecord
+            | None
+        ) = None,
+        changed: bool = False,
+    ) -> LiveSellExecutionRecordResult:
+        return LiveSellExecutionRecordResult(
+            resolver_version=(
+                LIVE_SELL_EXECUTION_RECORD_VERSION
+            ),
+            status=status,
+            reasons=tuple(
+                reasons
+            ),
+            authorization_sha256=(
+                authorization_sha256
+            ),
+            record=record,
+            changed=changed,
+        )
+
+    if not isinstance(
+        authorization,
+        LivePumpSellAuthorization,
+    ):
+        return finish(
+            BLOCK,
+            "SELL_AUTHORIZATION_INVALID",
+        )
+
+    authorization_sha256 = (
+        authorization.authorization_sha256
+    )
+
+    if (
+        authorization.authorization_version
+        != LIVE_PUMP_SELL_AUTHORIZATION_VERSION
+        or not _valid_sha256(
+            authorization_sha256
+        )
+    ):
+        return finish(
+            BLOCK,
+            "SELL_AUTHORIZATION_INVALID",
+        )
+
+    transaction_signature = (
+        transaction_signature.strip()
+        if isinstance(
+            transaction_signature,
+            str,
+        )
+        else ""
+    )
+
+    signed_transaction_sha256 = (
+        signed_transaction_sha256.strip()
+        if isinstance(
+            signed_transaction_sha256,
+            str,
+        )
+        else ""
+    )
+
+    try:
+        signature = Signature.from_string(
+            transaction_signature
+        )
+
+    except Exception:
+        return finish(
+            BLOCK,
+            "INVALID_TRANSACTION_SIGNATURE",
+        )
+
+    if signature == Signature.default():
+        return finish(
+            BLOCK,
+            "INVALID_TRANSACTION_SIGNATURE",
+        )
+
+    if not _valid_sha256(
+        signed_transaction_sha256
+    ):
+        return finish(
+            BLOCK,
+            "INVALID_SIGNED_TRANSACTION_SHA256",
+        )
+
+    if not db_path.exists():
+        return finish(
+            UNKNOWN,
+            "LIVE_SELL_EXECUTION_DATABASE_NOT_FOUND",
+        )
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        #
+        # While the RESERVED write lock is held,
+        # readers remain possible but no competing
+        # writer can terminalize the claim or arm
+        # this same execution record.
+        #
+        try:
+            claim_result = (
+                load_active_live_sell_inventory_claim_read_only(
+                    authorization=authorization,
+                    db_path=db_path,
+                )
+            )
+
+        except Exception:
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_SUBMISSION_CLAIM_READ_FAILED",
+            )
+
+        if (
+            claim_result.status
+            == CLAIM_UNKNOWN
+        ):
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_SUBMISSION_CLAIM_UNKNOWN",
+                *claim_result.reasons,
+            )
+
+        if (
+            claim_result.status
+            == CLAIM_BLOCK
+        ):
+            connection.rollback()
+
+            return finish(
+                BLOCK,
+                "SELL_SUBMISSION_CLAIM_BLOCKED",
+                *claim_result.reasons,
+            )
+
+        if (
+            claim_result.status
+            != CLAIM_PASS
+            or not
+            _active_claim_matches_submission_authority(
+                claim=claim_result.claim,
+                authorization=authorization,
+            )
+        ):
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_SUBMISSION_CLAIM_MISMATCH",
+            )
+
+        #
+        # Only after exact ACTIVE claim authority is
+        # established may an older v1 schema receive
+        # the additive submission metadata columns.
+        #
+        init_schema(
+            connection
+        )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_sell_execution_records
+            WHERE authorization_sha256 = ?
+            """,
+            (
+                authorization_sha256,
+            ),
+        ).fetchone()
+
+        if row is None:
+            connection.commit()
+
+            return finish(
+                BLOCK,
+                "SELL_EXECUTION_RECORD_NOT_FOUND",
+            )
+
+        try:
+            record = _row_to_record(
+                row
+            )
+
+        except Exception:
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_EXECUTION_RECORD_DECODE_FAILED",
+            )
+
+        if not _record_contract_valid(
+            record
+        ):
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_EXECUTION_RECORD_INVALID",
+                record=record,
+            )
+
+        if not _record_matches_submission_authority(
+            record=record,
+            authorization=authorization,
+            transaction_signature=(
+                transaction_signature
+            ),
+            signed_transaction_sha256=(
+                signed_transaction_sha256
+            ),
+        ):
+            connection.commit()
+
+            return finish(
+                BLOCK,
+                "SELL_SUBMISSION_ARTIFACT_MISMATCH",
+                record=record,
+            )
+
+        if (
+            record.status
+            == SUBMISSION_ARMED
+        ):
+            connection.commit()
+
+            return finish(
+                BLOCK,
+                (
+                    "SELL_SUBMISSION_ALREADY_ARMED_"
+                    "REQUIRES_RECONCILIATION"
+                ),
+                record=record,
+            )
+
+        if record.status == SUBMITTED:
+            connection.commit()
+
+            return finish(
+                BLOCK,
+                (
+                    "SELL_ALREADY_SUBMITTED_"
+                    "REQUIRES_RECONCILIATION"
+                ),
+                record=record,
+            )
+
+        if record.status != SIGNED:
+            connection.commit()
+
+            return finish(
+                BLOCK,
+                "SELL_EXECUTION_NOT_SIGNED",
+                record=record,
+            )
+
+        if (
+            record.submission_started_at
+            is not None
+            or record
+            .submission_attempt_count
+            != 0
+            or record.submitted_at
+            is not None
+        ):
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_SUBMISSION_METADATA_INCONSISTENT",
+                record=record,
+            )
+
+        now = time.time()
+
+        updated = connection.execute(
+            """
+            UPDATE live_sell_execution_records
+
+            SET
+                status = ?,
+                submission_started_at = ?,
+                submission_attempt_count = 1,
+                updated_at = ?
+
+            WHERE authorization_sha256 = ?
+              AND status = ?
+              AND transaction_signature = ?
+              AND signed_transaction_sha256 = ?
+              AND submission_started_at IS NULL
+              AND submission_attempt_count = 0
+              AND submitted_at IS NULL
+            """,
+            (
+                SUBMISSION_ARMED,
+                now,
+                now,
+                authorization_sha256,
+                SIGNED,
+                transaction_signature,
+                signed_transaction_sha256,
+            ),
+        )
+
+        if updated.rowcount != 1:
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_SUBMISSION_ARM_TRANSITION_FAILED",
+            )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_sell_execution_records
+            WHERE authorization_sha256 = ?
+            """,
+            (
+                authorization_sha256,
+            ),
+        ).fetchone()
+
+        if row is None:
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "ARMED_SELL_EXECUTION_RECORD_MISSING",
+            )
+
+        armed = _row_to_record(
+            row
+        )
+
+        if (
+            not _record_contract_valid(
+                armed
+            )
+            or armed.status
+            != SUBMISSION_ARMED
+            or armed.transaction_signature
+            != transaction_signature
+            or armed.signed_transaction_sha256
+            != signed_transaction_sha256
+            or armed.submission_started_at
+            is None
+            or armed
+            .submission_attempt_count
+            != 1
+            or armed.submitted_at
+            is not None
+        ):
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "ARMED_SELL_EXECUTION_RECORD_MISMATCH",
+                record=armed,
+            )
+
+        connection.commit()
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+    #
+    # Independent post-commit readback.
+    #
+    readback = (
+        load_live_sell_execution_record_read_only(
+            authorization_sha256=(
+                authorization_sha256
+            ),
+            db_path=db_path,
+        )
+    )
+
+    if (
+        readback.status
+        != PASS
+        or readback.record
+        is None
+    ):
+        return finish(
+            UNKNOWN,
+            "ARMED_SELL_EXECUTION_READBACK_FAILED",
+        )
+
+    persisted = readback.record
+
+    if (
+        persisted != armed
+        or persisted.status
+        != SUBMISSION_ARMED
+    ):
+        return finish(
+            UNKNOWN,
+            "PERSISTED_ARMED_SELL_EXECUTION_MISMATCH",
+            record=persisted,
+        )
+
+    return finish(
+        PASS,
+        record=persisted,
+        changed=True,
+    )
+
+
+def acknowledge_live_sell_submitted(
+    *,
+    authorization: LivePumpSellAuthorization,
+    transaction_signature: str,
+    signed_transaction_sha256: str,
+    db_path: Path = DB_PATH,
+) -> LiveSellExecutionRecordResult:
+    """
+    Durably acknowledge that the exact already-armed
+    SELL transaction was accepted by the RPC caller.
+
+    This function performs no network I/O.
+
+    Exact SUBMITTED retries are idempotent.
+    """
+
+    authorization_sha256 = ""
+
+    def finish(
+        status: str,
+        *reasons: str,
+        record: (
+            LiveSellExecutionRecord
+            | None
+        ) = None,
+        changed: bool = False,
+    ) -> LiveSellExecutionRecordResult:
+        return LiveSellExecutionRecordResult(
+            resolver_version=(
+                LIVE_SELL_EXECUTION_RECORD_VERSION
+            ),
+            status=status,
+            reasons=tuple(
+                reasons
+            ),
+            authorization_sha256=(
+                authorization_sha256
+            ),
+            record=record,
+            changed=changed,
+        )
+
+    if not isinstance(
+        authorization,
+        LivePumpSellAuthorization,
+    ):
+        return finish(
+            BLOCK,
+            "SELL_AUTHORIZATION_INVALID",
+        )
+
+    authorization_sha256 = (
+        authorization.authorization_sha256
+    )
+
+    transaction_signature = (
+        transaction_signature.strip()
+        if isinstance(
+            transaction_signature,
+            str,
+        )
+        else ""
+    )
+
+    signed_transaction_sha256 = (
+        signed_transaction_sha256.strip()
+        if isinstance(
+            signed_transaction_sha256,
+            str,
+        )
+        else ""
+    )
+
+    try:
+        signature = Signature.from_string(
+            transaction_signature
+        )
+
+    except Exception:
+        return finish(
+            BLOCK,
+            "INVALID_TRANSACTION_SIGNATURE",
+        )
+
+    if (
+        signature == Signature.default()
+        or not _valid_sha256(
+            signed_transaction_sha256
+        )
+    ):
+        return finish(
+            BLOCK,
+            "INVALID_SUBMISSION_ARTIFACT",
+        )
+
+    if not db_path.exists():
+        return finish(
+            UNKNOWN,
+            "LIVE_SELL_EXECUTION_DATABASE_NOT_FOUND",
+        )
+
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        init_schema(
+            connection
+        )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_sell_execution_records
+            WHERE authorization_sha256 = ?
+            """,
+            (
+                authorization_sha256,
+            ),
+        ).fetchone()
+
+        if row is None:
+            connection.commit()
+
+            return finish(
+                BLOCK,
+                "SELL_EXECUTION_RECORD_NOT_FOUND",
+            )
+
+        try:
+            record = _row_to_record(
+                row
+            )
+
+        except Exception:
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_EXECUTION_RECORD_DECODE_FAILED",
+            )
+
+        if not _record_contract_valid(
+            record
+        ):
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_EXECUTION_RECORD_INVALID",
+                record=record,
+            )
+
+        if not _record_matches_submission_authority(
+            record=record,
+            authorization=authorization,
+            transaction_signature=(
+                transaction_signature
+            ),
+            signed_transaction_sha256=(
+                signed_transaction_sha256
+            ),
+        ):
+            connection.commit()
+
+            return finish(
+                BLOCK,
+                "SELL_SUBMISSION_ARTIFACT_MISMATCH",
+                record=record,
+            )
+
+        if record.status == SUBMITTED:
+            connection.commit()
+
+            return finish(
+                PASS,
+                record=record,
+                changed=False,
+            )
+
+        if record.status != SUBMISSION_ARMED:
+            connection.commit()
+
+            return finish(
+                BLOCK,
+                "SELL_SUBMISSION_NOT_ARMED",
+                record=record,
+            )
+
+        if (
+            record.submission_started_at
+            is None
+            or record
+            .submission_attempt_count
+            != 1
+            or record.submitted_at
+            is not None
+        ):
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_SUBMISSION_METADATA_INCONSISTENT",
+                record=record,
+            )
+
+        now = time.time()
+
+        updated = connection.execute(
+            """
+            UPDATE live_sell_execution_records
+
+            SET
+                status = ?,
+                submitted_at = ?,
+                updated_at = ?
+
+            WHERE authorization_sha256 = ?
+              AND status = ?
+              AND transaction_signature = ?
+              AND signed_transaction_sha256 = ?
+              AND submission_started_at IS NOT NULL
+              AND submission_attempt_count = 1
+              AND submitted_at IS NULL
+            """,
+            (
+                SUBMITTED,
+                now,
+                now,
+                authorization_sha256,
+                SUBMISSION_ARMED,
+                transaction_signature,
+                signed_transaction_sha256,
+            ),
+        )
+
+        if updated.rowcount != 1:
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_SUBMITTED_TRANSITION_FAILED",
+            )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM live_sell_execution_records
+            WHERE authorization_sha256 = ?
+            """,
+            (
+                authorization_sha256,
+            ),
+        ).fetchone()
+
+        if row is None:
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SUBMITTED_SELL_EXECUTION_RECORD_MISSING",
+            )
+
+        submitted = _row_to_record(
+            row
+        )
+
+        if (
+            not _record_contract_valid(
+                submitted
+            )
+            or submitted.status
+            != SUBMITTED
+            or submitted.transaction_signature
+            != transaction_signature
+            or submitted.signed_transaction_sha256
+            != signed_transaction_sha256
+            or submitted.submission_started_at
+            is None
+            or submitted
+            .submission_attempt_count
+            != 1
+            or submitted.submitted_at
+            is None
+        ):
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SUBMITTED_SELL_EXECUTION_RECORD_MISMATCH",
+                record=submitted,
+            )
+
+        connection.commit()
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+    readback = (
+        load_live_sell_execution_record_read_only(
+            authorization_sha256=(
+                authorization_sha256
+            ),
+            db_path=db_path,
+        )
+    )
+
+    if (
+        readback.status
+        != PASS
+        or readback.record
+        is None
+    ):
+        return finish(
+            UNKNOWN,
+            "SUBMITTED_SELL_EXECUTION_READBACK_FAILED",
+        )
+
+    persisted = readback.record
+
+    if (
+        persisted != submitted
+        or persisted.status
+        != SUBMITTED
+    ):
+        return finish(
+            UNKNOWN,
+            "PERSISTED_SUBMITTED_SELL_EXECUTION_MISMATCH",
+            record=persisted,
+        )
+
+    return finish(
+        PASS,
+        record=persisted,
+        changed=True,
     )

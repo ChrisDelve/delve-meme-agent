@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from solders.pubkey import Pubkey
+
 from src.execution.order_authorization import (
     WRAPPED_SOL_MINT,
 )
@@ -36,6 +38,10 @@ from src.portfolio.live_transaction_journal import (
 
 LIVE_POSITION_VERSION = (
     "live-position-v1"
+)
+
+LIVE_POSITION_RISK_TOTALS_VERSION = (
+    "live-position-risk-totals-v1"
 )
 
 OPEN = "OPEN"
@@ -124,6 +130,19 @@ class SuccessfulBuyAccountingResult:
     terminal_reason: str | None
 
     changed: bool
+
+
+@dataclass(frozen=True)
+class LivePositionRiskTotalsResult:
+    loader_version: str
+
+    status: str
+    reasons: tuple[str, ...]
+
+    wallet_pubkey: str
+
+    open_exposure_lamports: int | None
+    open_positions: int | None
 
 
 def _strict_nonnegative_int(
@@ -643,6 +662,235 @@ def load_live_position_read_only(
 
         return _row_to_position(
             row
+        )
+
+    finally:
+        connection.close()
+
+
+def load_live_position_risk_totals_read_only(
+    *,
+    wallet_pubkey: str,
+    db_path: Path = DB_PATH,
+) -> LivePositionRiskTotalsResult:
+    """
+    Resolve authoritative OPEN live-position risk
+    for one exact wallet without mutating local state.
+
+    Exposure is the SUM of each OPEN lot's current
+    remaining_exposure_lamports.
+
+    Missing/unreadable state is UNKNOWN rather than
+    being interpreted as zero exposure.
+    """
+
+    normalized_wallet = ""
+
+    def finish(
+        status: str,
+        *reasons: str,
+        open_exposure_lamports: int | None = None,
+        open_positions: int | None = None,
+    ) -> LivePositionRiskTotalsResult:
+        return LivePositionRiskTotalsResult(
+            loader_version=(
+                LIVE_POSITION_RISK_TOTALS_VERSION
+            ),
+            status=status,
+            reasons=tuple(reasons),
+            wallet_pubkey=normalized_wallet,
+            open_exposure_lamports=(
+                open_exposure_lamports
+            ),
+            open_positions=open_positions,
+        )
+
+    if not isinstance(
+        wallet_pubkey,
+        str,
+    ):
+        return finish(
+            UNKNOWN,
+            "INVALID_WALLET_PUBKEY",
+        )
+
+    wallet_pubkey = (
+        wallet_pubkey.strip()
+    )
+
+    if not wallet_pubkey:
+        return finish(
+            UNKNOWN,
+            "INVALID_WALLET_PUBKEY",
+        )
+
+    try:
+        parsed_wallet = (
+            Pubkey.from_string(
+                wallet_pubkey
+            )
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "INVALID_WALLET_PUBKEY",
+        )
+
+    if parsed_wallet == Pubkey.default():
+        return finish(
+            UNKNOWN,
+            "INVALID_WALLET_PUBKEY",
+        )
+
+    normalized_wallet = str(
+        parsed_wallet
+    )
+
+    try:
+        database_exists = (
+            db_path.exists()
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_DATABASE_PATH_INVALID",
+        )
+
+    if not database_exists:
+        return finish(
+            UNKNOWN,
+            "LIVE_DATABASE_NOT_FOUND",
+        )
+
+    try:
+        database_uri = (
+            db_path.resolve().as_uri()
+            + "?mode=ro"
+        )
+
+        connection = sqlite3.connect(
+            database_uri,
+            uri=True,
+            timeout=30.0,
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_POSITION_RISK_READ_FAILED",
+        )
+
+    connection.row_factory = sqlite3.Row
+
+    try:
+        connection.execute(
+            "PRAGMA query_only = ON"
+        )
+
+        connection.execute(
+            "PRAGMA busy_timeout = 30000"
+        )
+
+        try:
+            rows = connection.execute(
+                """
+                SELECT
+                    position_version,
+                    remaining_exposure_lamports
+
+                FROM live_positions
+
+                WHERE wallet_pubkey = ?
+                  AND status = ?
+                """,
+                (
+                    normalized_wallet,
+                    OPEN,
+                ),
+            ).fetchall()
+
+        except sqlite3.OperationalError as error:
+            if (
+                "no such table: live_positions"
+                in str(error)
+            ):
+                return finish(
+                    UNKNOWN,
+                    "LIVE_POSITIONS_TABLE_NOT_FOUND",
+                )
+
+            return finish(
+                UNKNOWN,
+                "LIVE_POSITION_RISK_READ_FAILED",
+            )
+
+        except sqlite3.Error:
+            return finish(
+                UNKNOWN,
+                "LIVE_POSITION_RISK_READ_FAILED",
+            )
+
+        total_exposure = 0
+        open_position_count = 0
+
+        for row in rows:
+            if (
+                str(
+                    row["position_version"]
+                )
+                != LIVE_POSITION_VERSION
+            ):
+                return finish(
+                    UNKNOWN,
+                    "LIVE_POSITION_VERSION_MISMATCH",
+                )
+
+            exposure = row[
+                "remaining_exposure_lamports"
+            ]
+
+            if not _strict_nonnegative_int(
+                exposure
+            ):
+                return finish(
+                    UNKNOWN,
+                    "LIVE_POSITION_EXPOSURE_INVALID",
+                )
+
+            total_exposure += int(
+                exposure
+            )
+
+            if (
+                total_exposure
+                > SQLITE_INT_MAX
+            ):
+                return finish(
+                    UNKNOWN,
+                    "LIVE_POSITION_EXPOSURE_OVERFLOW",
+                )
+
+            open_position_count += 1
+
+            if (
+                open_position_count
+                > SQLITE_INT_MAX
+            ):
+                return finish(
+                    UNKNOWN,
+                    "LIVE_POSITION_COUNT_OVERFLOW",
+                )
+
+        return finish(
+            PASS,
+            open_exposure_lamports=(
+                total_exposure
+            ),
+            open_positions=(
+                open_position_count
+            ),
         )
 
     finally:

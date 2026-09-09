@@ -11,6 +11,7 @@ from src.execution.successful_pump_buy_fill import (
 )
 from src.portfolio.live_positions import (
     BLOCK,
+    LIVE_POSITION_RISK_TOTALS_VERSION,
     LIVE_POSITION_VERSION,
     OPEN,
     PASS,
@@ -18,6 +19,7 @@ from src.portfolio.live_positions import (
     UNKNOWN,
     init_schema as init_position_schema,
     load_live_position_read_only,
+    load_live_position_risk_totals_read_only,
     record_successful_buy_and_open_position,
 )
 from src.portfolio.live_reservations import (
@@ -64,7 +66,7 @@ class LivePositionAccountingTests(
         )
 
         self.wallet_pubkey = (
-            "SuccessfulWallet"
+            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
         )
 
         self.mint = (
@@ -83,6 +85,7 @@ class LivePositionAccountingTests(
         signature=None,
         status=SIGNED,
         mint=None,
+        wallet_pubkey=None,
         spend_lamports=1_000_000,
         wallet_cost_lamports=1_100_000,
         terminal_at=None,
@@ -100,6 +103,11 @@ class LivePositionAccountingTests(
 
         if mint is None:
             mint = self.mint
+
+        if wallet_pubkey is None:
+            wallet_pubkey = (
+                self.wallet_pubkey
+            )
 
         submission_started_at = None
         submission_attempt_count = 0
@@ -165,7 +173,7 @@ class LivePositionAccountingTests(
                     RESERVATION_VERSION,
                     mint,
                     "BUY",
-                    self.wallet_pubkey,
+                    wallet_pubkey,
                     spend_lamports,
                     wallet_cost_lamports,
                     status,
@@ -1357,6 +1365,521 @@ class LivePositionAccountingTests(
             OPEN,
         )
 
+
+
+    def test_risk_totals_missing_database_is_unknown_without_creating_it(
+        self,
+    ):
+        missing_path = (
+            Path(
+                self.temp_dir.name
+            )
+            / "missing-live.db"
+        )
+
+        self.assertFalse(
+            missing_path.exists()
+        )
+
+        result = (
+            load_live_position_risk_totals_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=missing_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "LIVE_DATABASE_NOT_FOUND",
+            result.reasons,
+        )
+
+        self.assertIsNone(
+            result.open_exposure_lamports
+        )
+
+        self.assertIsNone(
+            result.open_positions
+        )
+
+        self.assertFalse(
+            missing_path.exists()
+        )
+
+    def test_risk_totals_invalid_wallet_is_unknown(
+        self,
+    ):
+        result = (
+            load_live_position_risk_totals_read_only(
+                wallet_pubkey=(
+                    "not-a-solana-pubkey"
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "INVALID_WALLET_PUBKEY",
+            result.reasons,
+        )
+
+    def test_risk_totals_missing_table_is_unknown(
+        self,
+    ):
+        #
+        # setUp created the reservation schema but no
+        # live position has initialized live_positions.
+        #
+        result = (
+            load_live_position_risk_totals_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "LIVE_POSITIONS_TABLE_NOT_FOUND",
+            result.reasons,
+        )
+
+    def test_risk_totals_initialized_empty_wallet_is_zero(
+        self,
+    ):
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            init_position_schema(
+                connection
+            )
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        result = (
+            load_live_position_risk_totals_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.loader_version,
+            LIVE_POSITION_RISK_TOTALS_VERSION,
+        )
+
+        self.assertEqual(
+            result.status,
+            PASS,
+        )
+
+        self.assertEqual(
+            result.open_exposure_lamports,
+            0,
+        )
+
+        self.assertEqual(
+            result.open_positions,
+            0,
+        )
+
+    def test_risk_totals_use_remaining_not_entry_exposure(
+        self,
+    ):
+        transition = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            transition.status,
+            PASS,
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_positions
+                SET remaining_exposure_lamports = ?
+                WHERE reservation_id = ?
+                """,
+                (
+                    600_000,
+                    self.reservation_id,
+                ),
+            )
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        result = (
+            load_live_position_risk_totals_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            PASS,
+        )
+
+        self.assertEqual(
+            result.open_exposure_lamports,
+            600_000,
+        )
+
+        self.assertEqual(
+            result.open_positions,
+            1,
+        )
+
+    def test_risk_totals_sum_multiple_open_lots(
+        self,
+    ):
+        first = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            first.status,
+            PASS,
+        )
+
+        second_reservation = (
+            "risk-total-reservation-2"
+        )
+
+        second_signature = (
+            "RiskTotalSignature2"
+        )
+
+        second_mint = (
+            "RiskTotalMint2"
+        )
+
+        self.insert_reservation(
+            reservation_id=(
+                second_reservation
+            ),
+            signature=(
+                second_signature
+            ),
+            mint=second_mint,
+        )
+
+        second = (
+            record_successful_buy_and_open_position(
+                **self.evidence(
+                    reservation_id=(
+                        second_reservation
+                    ),
+                    transaction_signature=(
+                        second_signature
+                    ),
+                    mint=second_mint,
+                )
+            )
+        )
+
+        self.assertEqual(
+            second.status,
+            PASS,
+        )
+
+        result = (
+            load_live_position_risk_totals_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            PASS,
+        )
+
+        self.assertEqual(
+            result.open_exposure_lamports,
+            2_000_000,
+        )
+
+        self.assertEqual(
+            result.open_positions,
+            2,
+        )
+
+    def test_risk_totals_are_wallet_scoped(
+        self,
+    ):
+        first = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            first.status,
+            PASS,
+        )
+
+        other_wallet = (
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        )
+
+        second_reservation = (
+            "other-wallet-reservation"
+        )
+
+        second_signature = (
+            "OtherWalletSignature"
+        )
+
+        second_mint = (
+            "OtherWalletMint"
+        )
+
+        self.insert_reservation(
+            reservation_id=(
+                second_reservation
+            ),
+            signature=(
+                second_signature
+            ),
+            mint=second_mint,
+            wallet_pubkey=(
+                other_wallet
+            ),
+        )
+
+        second = (
+            record_successful_buy_and_open_position(
+                **self.evidence(
+                    reservation_id=(
+                        second_reservation
+                    ),
+                    transaction_signature=(
+                        second_signature
+                    ),
+                    mint=second_mint,
+                    wallet_pubkey=(
+                        other_wallet
+                    ),
+                )
+            )
+        )
+
+        self.assertEqual(
+            second.status,
+            PASS,
+        )
+
+        primary = (
+            load_live_position_risk_totals_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        alternate = (
+            load_live_position_risk_totals_read_only(
+                wallet_pubkey=(
+                    other_wallet
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            primary.status,
+            PASS,
+        )
+
+        self.assertEqual(
+            primary.open_exposure_lamports,
+            1_000_000,
+        )
+
+        self.assertEqual(
+            primary.open_positions,
+            1,
+        )
+
+        self.assertEqual(
+            alternate.status,
+            PASS,
+        )
+
+        self.assertEqual(
+            alternate.open_exposure_lamports,
+            1_000_000,
+        )
+
+        self.assertEqual(
+            alternate.open_positions,
+            1,
+        )
+
+    def test_risk_totals_exclude_non_open_positions(
+        self,
+    ):
+        transition = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            transition.status,
+            PASS,
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_positions
+
+                SET
+                    status = 'CLOSED',
+                    remaining_exposure_lamports = 0,
+                    remaining_cost_basis_lamports = 0
+
+                WHERE reservation_id = ?
+                """,
+                (
+                    self.reservation_id,
+                ),
+            )
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        result = (
+            load_live_position_risk_totals_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            PASS,
+        )
+
+        self.assertEqual(
+            result.open_exposure_lamports,
+            0,
+        )
+
+        self.assertEqual(
+            result.open_positions,
+            0,
+        )
+
+    def test_risk_totals_unknown_position_version_fails_closed(
+        self,
+    ):
+        transition = (
+            record_successful_buy_and_open_position(
+                **self.evidence()
+            )
+        )
+
+        self.assertEqual(
+            transition.status,
+            PASS,
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                UPDATE live_positions
+                SET position_version = ?
+                WHERE reservation_id = ?
+                """,
+                (
+                    "live-position-unknown-version",
+                    self.reservation_id,
+                ),
+            )
+            connection.commit()
+
+        finally:
+            connection.close()
+
+        result = (
+            load_live_position_risk_totals_read_only(
+                wallet_pubkey=(
+                    self.wallet_pubkey
+                ),
+                db_path=self.db_path,
+            )
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "LIVE_POSITION_VERSION_MISMATCH",
+            result.reasons,
+        )
+
+        self.assertIsNone(
+            result.open_exposure_lamports
+        )
+
+        self.assertIsNone(
+            result.open_positions
+        )
 
 if __name__ == "__main__":
     unittest.main()

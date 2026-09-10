@@ -47,6 +47,7 @@ from src.safety.token_safety_resolver import (
     PUMP_PROGRAM,
     TOKEN_2022_PROGRAM,
     TOKEN_PROGRAM,
+    derive_associated_token_account,
 )
 
 
@@ -165,6 +166,19 @@ class PumpSellV2UnsignedMessageTests(
             )
         ]
 
+        associated_quote_user = (
+            derive_associated_token_account(
+                owner=Pubkey.from_string(
+                    authorization.wallet_pubkey
+                ),
+                mint=Pubkey.from_string(
+                    authorization
+                    .quote_mint_for_instruction
+                ),
+                token_program=TOKEN_PROGRAM,
+            )
+        )
+
         return PumpSellV2AccountContext(
             resolver_version=(
                 PUMP_SELL_V2_ACCOUNT_CONTEXT_VERSION
@@ -249,8 +263,8 @@ class PumpSellV2UnsignedMessageTests(
             associated_base_user=(
                 authorization.associated_base_user
             ),
-            associated_quote_user=(
-                random_accounts[15]
+            associated_quote_user=str(
+                associated_quote_user
             ),
 
             creator_vault=random_accounts[16],

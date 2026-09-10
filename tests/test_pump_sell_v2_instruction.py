@@ -28,6 +28,7 @@ from src.safety.token_safety_resolver import (
     PUMP_PROGRAM,
     TOKEN_2022_PROGRAM,
     TOKEN_PROGRAM,
+    derive_associated_token_account,
 )
 
 
@@ -45,6 +46,20 @@ class PumpSellV2InstructionTests(
                 26
             )
         ]
+
+        user = Pubkey.new_unique()
+
+        associated_quote_user = (
+            derive_associated_token_account(
+                owner=user,
+                mint=Pubkey.from_string(
+                    str(
+                        WRAPPED_SOL_MINT
+                    )
+                ),
+                token_program=TOKEN_PROGRAM,
+            )
+        )
 
         return PumpSellV2AccountContext(
             resolver_version=(
@@ -109,12 +124,14 @@ class PumpSellV2InstructionTests(
                 random_accounts[12]
             ),
 
-            user=random_accounts[13],
+            user=str(
+                user
+            ),
             associated_base_user=(
                 random_accounts[14]
             ),
-            associated_quote_user=(
-                random_accounts[15]
+            associated_quote_user=str(
+                associated_quote_user
             ),
 
             creator_vault=random_accounts[16],
@@ -382,6 +399,24 @@ class PumpSellV2InstructionTests(
             first.instruction_sha256,
             changed.instruction_sha256,
         )
+
+    def test_noncanonical_associated_quote_user_rejected(
+        self,
+    ):
+        context = replace(
+            self.make_context(),
+            associated_quote_user=str(
+                Pubkey.new_unique()
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            PumpSellV2InstructionError,
+            "canonical user wrapped-SOL ATA",
+        ):
+            build_pump_sell_v2_instruction(
+                context=context
+            )
 
     def test_wrong_program_rejected(
         self,

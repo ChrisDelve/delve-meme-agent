@@ -26,6 +26,7 @@ from src.safety.token_safety_resolver import (
     PUMP_PROGRAM,
     TOKEN_2022_PROGRAM,
     TOKEN_PROGRAM,
+    derive_associated_token_account,
 )
 
 
@@ -454,6 +455,47 @@ def build_pump_sell_v2_instruction(
         raise PumpSellV2InstructionError(
             "SELL associated token program "
             "is invalid."
+        )
+
+    #
+    # The user quote destination is an economic
+    # authority boundary. A caller-supplied context
+    # must never be able to redirect SELL proceeds by
+    # substituting an arbitrary token account while
+    # claiming the legitimate context version.
+    #
+    user = _required_pubkey(
+        context.user,
+        label="user",
+    )
+
+    quote_mint = _required_pubkey(
+        context.quote_mint,
+        label="quote_mint",
+    )
+
+    associated_quote_user = (
+        _required_pubkey(
+            context.associated_quote_user,
+            label="associated_quote_user",
+        )
+    )
+
+    canonical_associated_quote_user = (
+        derive_associated_token_account(
+            owner=user,
+            mint=quote_mint,
+            token_program=TOKEN_PROGRAM,
+        )
+    )
+
+    if (
+        associated_quote_user
+        != canonical_associated_quote_user
+    ):
+        raise PumpSellV2InstructionError(
+            "SELL associated quote user is "
+            "not the canonical user wrapped-SOL ATA."
         )
 
     if (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from src.execution.live_sell_initiator import (
@@ -11,6 +12,7 @@ from src.execution.live_sell_initiator import (
     LiveSellInitiationResult,
     initiate_live_sell_once,
 )
+from src.portfolio.live_reservations import DB_PATH
 from src.portfolio.live_wallet_valuation import (
     RESOLVED as VALUATION_RESOLVED,
     LIVE_WALLET_VALUATION_VERSION,
@@ -171,6 +173,7 @@ async def control_live_exit_once(
     base_network_fee_lamports: int,
     priority_fee_lamports: int,
     min_context_slot: int | None = None,
+    db_path: Path = DB_PATH,
 ) -> LiveExitControllerResult:
     """
     Resolve, evaluate, and if warranted initiate at most
@@ -266,6 +269,16 @@ async def control_live_exit_once(
         )
 
     try:
+        normalized_path = Path(
+            db_path
+        )
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_DATABASE_PATH_INVALID",
+        )
+
+    try:
         valuation_result = (
             await resolve_live_wallet_valuation(
                 wallet_pubkey=wallet_pubkey,
@@ -277,6 +290,7 @@ async def control_live_exit_once(
                     priority_fee_lamports
                 ),
                 min_context_slot=min_context_slot,
+                db_path=normalized_path,
             )
         )
     except Exception:
@@ -485,6 +499,7 @@ async def control_live_exit_once(
                 priority_fee_lamports=(
                     priority_fee_lamports
                 ),
+                db_path=normalized_path,
             )
         )
     except Exception:

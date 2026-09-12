@@ -9,6 +9,7 @@ from unittest.mock import (
 
 from solders.pubkey import Pubkey
 
+from src.portfolio.live_reservations import DB_PATH
 from src.execution.pump_execution_simulator import (
     PumpCurveState,
 )
@@ -795,6 +796,7 @@ class LivePumpBuyReservationTests(
                 11_000
             ),
             min_context_slot=450,
+            db_path=DB_PATH,
         )
 
         reserve_mock.assert_called_once_with(
@@ -817,6 +819,7 @@ class LivePumpBuyReservationTests(
             rent_lamports=1_844_400,
             reservation_ttl_seconds=60.0,
             policy=self.policy,
+            db_path=DB_PATH,
         )
 
     async def test_zero_protected_cash_passes_raw_balance_unchanged(
@@ -944,7 +947,7 @@ class LivePumpBuyReservationTests(
             result.reasons,
         )
 
-    def test_public_contract_has_no_database_override_and_separates_buy_from_exit_policy(
+    def test_public_contract_exposes_database_override_and_separates_buy_from_exit_policy(
         self,
     ):
         parameters = (
@@ -954,9 +957,14 @@ class LivePumpBuyReservationTests(
             .parameters
         )
 
-        self.assertNotIn(
+        self.assertIn(
             "db_path",
             parameters,
+        )
+
+        self.assertEqual(
+            parameters["db_path"].default,
+            DB_PATH,
         )
 
         for name in (
@@ -973,6 +981,45 @@ class LivePumpBuyReservationTests(
                 name,
                 parameters,
             )
+
+
+    async def test_custom_database_path_reaches_risk_and_reservation(
+        self,
+    ):
+        custom_path = (
+            DB_PATH.parent
+            / "buy-reservation-custom.db"
+        )
+
+        (
+            result,
+            account,
+            reserve,
+        ) = await self.resolve(
+            call_overrides={
+                "db_path": custom_path,
+            },
+        )
+
+        self.assertEqual(
+            result.status,
+            PASS,
+        )
+
+        self.assertEqual(
+            account.await_args.kwargs.get(
+                "db_path"
+            ),
+            custom_path,
+        )
+
+        self.assertEqual(
+            reserve.call_args.kwargs.get(
+                "db_path"
+            ),
+            custom_path,
+        )
+
 
 
 if __name__ == "__main__":

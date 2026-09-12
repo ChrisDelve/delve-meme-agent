@@ -8,6 +8,7 @@ from unittest.mock import (
 
 from solders.pubkey import Pubkey
 
+from src.portfolio.live_reservations import DB_PATH
 from src.portfolio.live_account_risk_state import (
     LIVE_ACCOUNT_RISK_STATE_VERSION,
     RESOLVED,
@@ -173,6 +174,7 @@ class LiveAccountRiskStateTests(
         risk_results=None,
         valuation=None,
         continuity=None,
+        db_path=DB_PATH,
     ):
         if wallet is None:
             wallet = self.wallet
@@ -250,6 +252,7 @@ class LiveAccountRiskStateTests(
                     min_context_slot=(
                         min_context_slot
                     ),
+                    db_path=db_path,
                 )
             )
 
@@ -834,6 +837,7 @@ class LiveAccountRiskStateTests(
                 self.priority_fee
             ),
             min_context_slot=650,
+            db_path=DB_PATH,
         )
 
         continuity_mock.assert_called_once_with(
@@ -845,6 +849,7 @@ class LiveAccountRiskStateTests(
                 10_000_000
             ),
             wallet_balance_rpc_slot=700,
+            db_path=DB_PATH,
         )
 
     async def test_zero_open_exposure_and_positions_are_valid(
@@ -883,6 +888,61 @@ class LiveAccountRiskStateTests(
             result.account.open_positions,
             0,
         )
+
+
+    async def test_custom_database_path_reaches_entire_risk_bracket(
+        self,
+    ):
+        custom_path = (
+            DB_PATH.parent
+            / "account-risk-custom.db"
+        )
+
+        (
+            result,
+            risk,
+            valuation,
+            continuity,
+        ) = await self.resolve(
+            db_path=custom_path,
+        )
+
+        self.assertEqual(
+            result.status,
+            RESOLVED,
+        )
+
+        self.assertEqual(
+            risk.call_count,
+            2,
+        )
+
+        self.assertEqual(
+            [
+                item.kwargs.get("db_path")
+                for item
+                in risk.call_args_list
+            ],
+            [
+                custom_path,
+                custom_path,
+            ],
+        )
+
+        self.assertEqual(
+            valuation.await_args.kwargs.get(
+                "db_path"
+            ),
+            custom_path,
+        )
+
+        self.assertEqual(
+            continuity.call_args.kwargs.get(
+                "db_path"
+            ),
+            custom_path,
+        )
+
 
 
 if __name__ == "__main__":

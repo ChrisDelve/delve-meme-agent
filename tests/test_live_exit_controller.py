@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from src.portfolio.live_reservations import DB_PATH
 from src.execution.live_exit_controller import (
     BLOCK,
     CLAIMED,
@@ -197,6 +198,7 @@ class LiveExitControllerTests(
         decisions=(),
         initiation=None,
         evaluated_at=None,
+        db_path=DB_PATH,
     ):
         if evaluated_at is None:
             evaluated_at = self.evaluated_at
@@ -225,6 +227,7 @@ class LiveExitControllerTests(
                 slippage_bps=300,
                 base_network_fee_lamports=5_000,
                 priority_fee_lamports=0,
+                db_path=db_path,
             )
 
         return (
@@ -467,6 +470,66 @@ class LiveExitControllerTests(
             slippage_bps=300,
             base_network_fee_lamports=5_000,
             priority_fee_lamports=0,
+            db_path=DB_PATH,
+        )
+
+    async def test_custom_database_path_reaches_valuation_and_initiation(
+        self,
+    ):
+        custom_path = (
+            DB_PATH.parent
+            / "exit-controller-custom.db"
+        )
+
+        mint_valuation = self.mint_valuation(
+            "mint-a"
+        )
+
+        wallet_result = self.wallet_result(
+            (mint_valuation,)
+        )
+
+        exit_decision = self.decision(
+            mint="mint-a",
+            status=FULL_EXIT,
+            reason="TAKE_PROFIT",
+        )
+
+        initiation = self.initiation(
+            mint="mint-a"
+        )
+
+        (
+            result,
+            valuation,
+            _,
+            initiation_mock,
+        ) = await self.run_controller(
+            wallet_result=wallet_result,
+            decisions=(
+                exit_decision,
+            ),
+            initiation=initiation,
+            db_path=custom_path,
+        )
+
+        self.assertEqual(
+            result.status,
+            CLAIMED,
+        )
+
+        self.assertEqual(
+            valuation.await_args.kwargs.get(
+                "db_path"
+            ),
+            custom_path,
+        )
+
+        self.assertEqual(
+            initiation_mock.await_args.kwargs.get(
+                "db_path"
+            ),
+            custom_path,
         )
 
     async def test_stop_loss_has_priority_over_take_profit(

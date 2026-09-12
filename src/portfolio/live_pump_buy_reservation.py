@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from solders.pubkey import Pubkey
@@ -15,6 +16,7 @@ from src.portfolio.live_account_risk_state import (
     resolve_live_account_risk_state,
 )
 from src.portfolio.live_reservations import (
+    DB_PATH,
     ACTIVE,
     RESERVATION_VERSION,
     SQLITE_INT_MAX,
@@ -127,6 +129,7 @@ async def reserve_live_pump_buy(
 
     policy: RiskPolicy | None = None,
     min_context_slot: int | None = None,
+    db_path: Path = DB_PATH,
 ) -> LivePumpBuyReservationResult:
     """
     Resolve authoritative live portfolio risk and
@@ -389,6 +392,19 @@ async def reserve_live_pump_buy(
             ),
         )
 
+    try:
+        normalized_path = Path(
+            db_path
+        )
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_DATABASE_PATH_INVALID",
+            protected_cash=(
+                protected_cash_lamports
+            ),
+        )
+
     # --------------------------------------------------------
     # Authoritative account state.
     #
@@ -414,6 +430,7 @@ async def reserve_live_pump_buy(
                 min_context_slot=(
                     min_context_slot
                 ),
+                db_path=normalized_path,
             )
         )
 
@@ -736,6 +753,7 @@ async def reserve_live_pump_buy(
                     reservation_ttl_seconds
                 ),
                 policy=policy,
+                db_path=normalized_path,
             )
         )
 

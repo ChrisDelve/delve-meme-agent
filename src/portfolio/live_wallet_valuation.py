@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from solders.pubkey import Pubkey
@@ -22,6 +23,7 @@ from src.portfolio.live_positions import (
     LivePosition,
     load_open_live_positions_read_only,
 )
+from src.portfolio.live_reservations import DB_PATH
 
 
 LIVE_WALLET_VALUATION_VERSION = (
@@ -173,6 +175,7 @@ async def resolve_live_wallet_valuation(
     base_network_fee_lamports: int,
     priority_fee_lamports: int,
     min_context_slot: int | None = None,
+    db_path: Path = DB_PATH,
 ) -> LiveWalletValuationResult:
     """
     Resolve one conservative instantaneous wallet
@@ -357,6 +360,16 @@ async def resolve_live_wallet_valuation(
             "INVALID_MIN_CONTEXT_SLOT",
         )
 
+    try:
+        normalized_path = Path(
+            db_path
+        )
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_DATABASE_PATH_INVALID",
+        )
+
     # --------------------------------------------------------
     # First authoritative local inventory snapshot
     # --------------------------------------------------------
@@ -367,6 +380,7 @@ async def resolve_live_wallet_valuation(
                 wallet_pubkey=(
                     normalized_wallet
                 ),
+                db_path=normalized_path,
             )
         )
 
@@ -1242,6 +1256,7 @@ async def resolve_live_wallet_valuation(
                 wallet_pubkey=(
                     normalized_wallet
                 ),
+                db_path=normalized_path,
             )
         )
 

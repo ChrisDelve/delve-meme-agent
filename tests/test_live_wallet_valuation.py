@@ -8,6 +8,7 @@ from unittest.mock import (
 
 from solders.pubkey import Pubkey
 
+from src.portfolio.live_reservations import DB_PATH
 from src.execution.live_pump_liquidation_value import (
     LIVE_PUMP_LIQUIDATION_VALUE_VERSION,
 )
@@ -202,6 +203,7 @@ class LiveWalletValuationTests(
         position_results=None,
         balance_result=None,
         liquidation_side_effect=None,
+        db_path=DB_PATH,
     ):
         if wallet is None:
             wallet = self.wallet
@@ -301,6 +303,7 @@ class LiveWalletValuationTests(
                     min_context_slot=(
                         min_context_slot
                     ),
+                    db_path=db_path,
                 )
             )
 
@@ -1558,6 +1561,47 @@ class LiveWalletValuationTests(
         self.assertIsNone(
             result.current_equity_lamports
         )
+
+
+    async def test_custom_database_path_reaches_both_position_snapshots(
+        self,
+    ):
+        custom_path = (
+            DB_PATH.parent
+            / "wallet-valuation-custom.db"
+        )
+
+        (
+            result,
+            positions,
+            _,
+            _,
+        ) = await self.resolve(
+            db_path=custom_path,
+        )
+
+        self.assertEqual(
+            result.status,
+            RESOLVED,
+        )
+
+        self.assertEqual(
+            positions.call_count,
+            2,
+        )
+
+        self.assertEqual(
+            [
+                item.kwargs.get("db_path")
+                for item
+                in positions.call_args_list
+            ],
+            [
+                custom_path,
+                custom_path,
+            ],
+        )
+
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from solders.pubkey import Pubkey
@@ -23,6 +24,7 @@ from src.portfolio.live_wallet_valuation import (
     LiveWalletValuationResult,
     resolve_live_wallet_valuation,
 )
+from src.portfolio.live_reservations import DB_PATH
 from src.risk.risk_governor import (
     AccountRiskState,
 )
@@ -171,6 +173,7 @@ async def resolve_live_account_risk_state(
     base_network_fee_lamports: int,
     priority_fee_lamports: int,
     min_context_slot: int | None = None,
+    db_path: Path = DB_PATH,
 ) -> LiveAccountRiskStateResult:
     """
     Resolve the authoritative live AccountRiskState
@@ -325,6 +328,16 @@ async def resolve_live_account_risk_state(
             "INVALID_MIN_CONTEXT_SLOT",
         )
 
+    try:
+        normalized_path = Path(
+            db_path
+        )
+    except Exception:
+        return finish(
+            UNKNOWN,
+            "LIVE_DATABASE_PATH_INVALID",
+        )
+
     # --------------------------------------------------------
     # Risk totals BEFORE valuation.
     # --------------------------------------------------------
@@ -335,6 +348,7 @@ async def resolve_live_account_risk_state(
                 wallet_pubkey=(
                     normalized_wallet
                 ),
+                db_path=normalized_path,
             )
         )
 
@@ -398,6 +412,7 @@ async def resolve_live_account_risk_state(
                 min_context_slot=(
                     min_context_slot
                 ),
+                db_path=normalized_path,
             )
         )
 
@@ -551,6 +566,7 @@ async def resolve_live_account_risk_state(
                 wallet_pubkey=(
                     normalized_wallet
                 ),
+                db_path=normalized_path,
             )
         )
 
@@ -678,6 +694,7 @@ async def resolve_live_account_risk_state(
                 wallet_balance_rpc_slot=(
                     balance_rpc_slot
                 ),
+                db_path=normalized_path,
             )
         )
 

@@ -23,6 +23,7 @@ from src.portfolio.live_wallet_valuation import (
     LIVE_WALLET_VALUATION_VERSION,
     RESOLVED,
     UNKNOWN,
+    I64_MAX,
     U64_MAX,
     resolve_live_wallet_valuation,
 )
@@ -60,6 +61,23 @@ class LiveWalletValuationTests(
         mint,
         tokens,
         reservation_id=None,
+
+        entry_slot=100,
+        entry_block_time=1_000,
+
+        entry_wallet_cost_lamports=(
+            1_000_000
+        ),
+        remaining_exposure_lamports=(
+            1_000_000
+        ),
+        remaining_cost_basis_lamports=(
+            900_000
+        ),
+
+        cumulative_net_proceeds_lamports=0,
+        cumulative_realized_pnl_lamports=0,
+
         updated_at=100.0,
     ):
         if reservation_id is None:
@@ -78,13 +96,31 @@ class LiveWalletValuationTests(
             wallet_pubkey=self.wallet,
             mint=mint,
             status=OPEN,
+
+            entry_slot=entry_slot,
+            entry_block_time=(
+                entry_block_time
+            ),
+
             tokens_held=tokens,
+
+            entry_wallet_cost_lamports=(
+                entry_wallet_cost_lamports
+            ),
             remaining_exposure_lamports=(
-                1_000_000
+                remaining_exposure_lamports
             ),
             remaining_cost_basis_lamports=(
-                900_000
+                remaining_cost_basis_lamports
             ),
+
+            cumulative_net_proceeds_lamports=(
+                cumulative_net_proceeds_lamports
+            ),
+            cumulative_realized_pnl_lamports=(
+                cumulative_realized_pnl_lamports
+            ),
+
             updated_at=updated_at,
         )
 
@@ -553,6 +589,300 @@ class LiveWalletValuationTests(
         self.assertEqual(
             valuation.tokens_held,
             1_000_000,
+        )
+
+    async def test_same_mint_lots_aggregate_accounting_and_entry_bounds(
+        self,
+    ):
+        positions = (
+            self.position(
+                position_id=1,
+                mint=self.mint_a,
+                tokens=400_000,
+                entry_slot=100,
+                entry_block_time=1_000,
+                entry_wallet_cost_lamports=(
+                    700_000
+                ),
+                remaining_cost_basis_lamports=(
+                    300_000
+                ),
+                cumulative_net_proceeds_lamports=(
+                    500_000
+                ),
+                cumulative_realized_pnl_lamports=(
+                    100_000
+                ),
+            ),
+            self.position(
+                position_id=2,
+                mint=self.mint_a,
+                tokens=600_000,
+                entry_slot=250,
+                entry_block_time=1_200,
+                entry_wallet_cost_lamports=(
+                    900_000
+                ),
+                remaining_cost_basis_lamports=(
+                    700_000
+                ),
+                cumulative_net_proceeds_lamports=(
+                    150_000
+                ),
+                cumulative_realized_pnl_lamports=(
+                    -50_000
+                ),
+            ),
+        )
+
+        snapshot = self.positions_result(
+            positions
+        )
+
+        async def liquidation(
+            **kwargs,
+        ):
+            return self.liquidation_result(
+                mint=kwargs["mint"],
+                tokens=kwargs[
+                    "tokens_held"
+                ],
+                value=333_000,
+            )
+
+        result = (
+            await self.resolve(
+                position_results=[
+                    snapshot,
+                    snapshot,
+                ],
+                liquidation_side_effect=(
+                    liquidation
+                ),
+            )
+        )[0]
+
+        self.assertEqual(
+            result.status,
+            RESOLVED,
+        )
+
+        self.assertEqual(
+            len(result.mint_valuations),
+            1,
+        )
+
+        valuation = (
+            result.mint_valuations[0]
+        )
+
+        self.assertEqual(
+            valuation.open_lots,
+            2,
+        )
+
+        self.assertEqual(
+            valuation.tokens_held,
+            1_000_000,
+        )
+
+        self.assertEqual(
+            valuation.total_entry_wallet_cost_lamports,
+            1_600_000,
+        )
+
+        self.assertEqual(
+            valuation.remaining_cost_basis_lamports,
+            1_000_000,
+        )
+
+        self.assertEqual(
+            valuation.cumulative_net_proceeds_lamports,
+            650_000,
+        )
+
+        self.assertEqual(
+            valuation.cumulative_realized_pnl_lamports,
+            50_000,
+        )
+
+        self.assertEqual(
+            valuation.oldest_entry_slot,
+            100,
+        )
+
+        self.assertEqual(
+            valuation.newest_entry_slot,
+            250,
+        )
+
+        self.assertEqual(
+            valuation.oldest_entry_block_time,
+            1_000,
+        )
+
+        self.assertEqual(
+            valuation.newest_entry_block_time,
+            1_200,
+        )
+
+        self.assertEqual(
+            valuation.liquidation_value_lamports,
+            333_000,
+        )
+
+    async def test_missing_lot_block_time_makes_mint_time_bounds_unknown(
+        self,
+    ):
+        positions = (
+            self.position(
+                position_id=1,
+                mint=self.mint_a,
+                tokens=400_000,
+                entry_slot=100,
+                entry_block_time=None,
+            ),
+            self.position(
+                position_id=2,
+                mint=self.mint_a,
+                tokens=600_000,
+                entry_slot=250,
+                entry_block_time=1_200,
+            ),
+        )
+
+        snapshot = self.positions_result(
+            positions
+        )
+
+        async def liquidation(
+            **kwargs,
+        ):
+            return self.liquidation_result(
+                mint=kwargs["mint"],
+                tokens=kwargs[
+                    "tokens_held"
+                ],
+                value=333_000,
+            )
+
+        result = (
+            await self.resolve(
+                position_results=[
+                    snapshot,
+                    snapshot,
+                ],
+                liquidation_side_effect=(
+                    liquidation
+                ),
+            )
+        )[0]
+
+        self.assertEqual(
+            result.status,
+            RESOLVED,
+        )
+
+        valuation = (
+            result.mint_valuations[0]
+        )
+
+        self.assertEqual(
+            valuation.oldest_entry_slot,
+            100,
+        )
+
+        self.assertEqual(
+            valuation.newest_entry_slot,
+            250,
+        )
+
+        self.assertIsNone(
+            valuation.oldest_entry_block_time
+        )
+
+        self.assertIsNone(
+            valuation.newest_entry_block_time
+        )
+
+    async def test_accounting_change_during_valuation_is_unknown(
+        self,
+    ):
+        first_position = self.position(
+            position_id=1,
+            mint=self.mint_a,
+            tokens=100,
+            cumulative_net_proceeds_lamports=0,
+            cumulative_realized_pnl_lamports=0,
+            updated_at=100.0,
+        )
+
+        changed_position = self.position(
+            position_id=1,
+            mint=self.mint_a,
+            tokens=100,
+            cumulative_net_proceeds_lamports=(
+                25_000
+            ),
+            cumulative_realized_pnl_lamports=(
+                25_000
+            ),
+            # Deliberately unchanged.
+            #
+            # This proves the strengthened
+            # fingerprint observes accounting
+            # state directly rather than relying
+            # only on updated_at.
+            updated_at=100.0,
+        )
+
+        first = self.positions_result(
+            (
+                first_position,
+            )
+        )
+
+        changed = self.positions_result(
+            (
+                changed_position,
+            )
+        )
+
+        async def liquidation(
+            **kwargs,
+        ):
+            return self.liquidation_result(
+                mint=kwargs["mint"],
+                tokens=kwargs[
+                    "tokens_held"
+                ],
+                value=100,
+            )
+
+        result = (
+            await self.resolve(
+                position_results=[
+                    first,
+                    changed,
+                ],
+                liquidation_side_effect=(
+                    liquidation
+                ),
+            )
+        )[0]
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "OPEN_POSITION_BOOK_CHANGED_DURING_VALUATION",
+            result.reasons,
+        )
+
+        self.assertIsNone(
+            result.current_equity_lamports
         )
 
     async def test_distinct_mints_are_valued_in_deterministic_order(
@@ -1031,6 +1361,102 @@ class LiveWalletValuationTests(
         self.assertIsNone(
             result.current_equity_lamports
         )
+
+    async def test_aggregate_accounting_overflow_fails_closed(
+        self,
+    ):
+        positions = (
+            self.position(
+                position_id=1,
+                mint=self.mint_a,
+                tokens=100,
+                entry_wallet_cost_lamports=(
+                    U64_MAX
+                ),
+            ),
+            self.position(
+                position_id=2,
+                mint=self.mint_a,
+                tokens=100,
+                entry_wallet_cost_lamports=1,
+            ),
+        )
+
+        snapshot = self.positions_result(
+            positions
+        )
+
+        (
+            result,
+            _,
+            balance_mock,
+            liquidation_mock,
+        ) = await self.resolve(
+            position_results=[
+                snapshot,
+            ],
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "OPEN_POSITION_ACCOUNTING_OVERFLOW",
+            result.reasons,
+        )
+
+        balance_mock.assert_not_awaited()
+        liquidation_mock.assert_not_awaited()
+
+    async def test_aggregate_realized_pnl_overflow_fails_closed(
+        self,
+    ):
+        positions = (
+            self.position(
+                position_id=1,
+                mint=self.mint_a,
+                tokens=100,
+                cumulative_realized_pnl_lamports=(
+                    I64_MAX
+                ),
+            ),
+            self.position(
+                position_id=2,
+                mint=self.mint_a,
+                tokens=100,
+                cumulative_realized_pnl_lamports=1,
+            ),
+        )
+
+        snapshot = self.positions_result(
+            positions
+        )
+
+        (
+            result,
+            _,
+            balance_mock,
+            liquidation_mock,
+        ) = await self.resolve(
+            position_results=[
+                snapshot,
+            ],
+        )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+
+        self.assertIn(
+            "OPEN_POSITION_REALIZED_PNL_OVERFLOW",
+            result.reasons,
+        )
+
+        balance_mock.assert_not_awaited()
+        liquidation_mock.assert_not_awaited()
 
     async def test_aggregate_inventory_overflow_fails_closed(
         self,

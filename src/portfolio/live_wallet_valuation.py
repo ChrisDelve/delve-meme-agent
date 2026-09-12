@@ -34,6 +34,9 @@ UNKNOWN = "UNKNOWN"
 BPS_DENOMINATOR = 10_000
 U64_MAX = (1 << 64) - 1
 
+I64_MIN = -(1 << 63)
+I64_MAX = (1 << 63) - 1
+
 
 @dataclass(frozen=True)
 class LiveMintInventoryValuation:
@@ -41,6 +44,18 @@ class LiveMintInventoryValuation:
 
     open_lots: int
     tokens_held: int
+
+    total_entry_wallet_cost_lamports: int
+    remaining_cost_basis_lamports: int
+
+    cumulative_net_proceeds_lamports: int
+    cumulative_realized_pnl_lamports: int
+
+    oldest_entry_slot: int
+    newest_entry_slot: int
+
+    oldest_entry_block_time: int | None
+    newest_entry_block_time: int | None
 
     liquidation_value_lamports: int
 
@@ -86,6 +101,16 @@ def _strict_u64(
     )
 
 
+def _strict_i64(
+    value: Any,
+) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and I64_MIN <= value <= I64_MAX
+    )
+
+
 def _strict_positive_u64(
     value: Any,
 ) -> bool:
@@ -122,9 +147,19 @@ def _position_book_fingerprint(
             position.wallet_pubkey,
             position.mint,
             position.status,
+
+            position.entry_slot,
+            position.entry_block_time,
+
             position.tokens_held,
+
+            position.entry_wallet_cost_lamports,
             position.remaining_exposure_lamports,
             position.remaining_cost_basis_lamports,
+
+            position.cumulative_net_proceeds_lamports,
+            position.cumulative_realized_pnl_lamports,
+
             position.updated_at,
         )
         for position in positions
@@ -418,7 +453,7 @@ async def resolve_live_wallet_valuation(
 
     inventory: dict[
         str,
-        dict[str, int],
+        dict[str, Any],
     ] = {}
 
     for position in positions:
@@ -431,6 +466,42 @@ async def resolve_live_wallet_valuation(
         tokens_held = getattr(
             position,
             "tokens_held",
+            None,
+        )
+
+        entry_wallet_cost = getattr(
+            position,
+            "entry_wallet_cost_lamports",
+            None,
+        )
+
+        remaining_cost_basis = getattr(
+            position,
+            "remaining_cost_basis_lamports",
+            None,
+        )
+
+        cumulative_net_proceeds = getattr(
+            position,
+            "cumulative_net_proceeds_lamports",
+            None,
+        )
+
+        cumulative_realized_pnl = getattr(
+            position,
+            "cumulative_realized_pnl_lamports",
+            None,
+        )
+
+        entry_slot = getattr(
+            position,
+            "entry_slot",
+            None,
+        )
+
+        entry_block_time = getattr(
+            position,
+            "entry_block_time",
             None,
         )
 
@@ -452,11 +523,55 @@ async def resolve_live_wallet_valuation(
                 ),
             )
 
+        if (
+            not _strict_positive_u64(
+                entry_wallet_cost
+            )
+            or not _strict_u64(
+                remaining_cost_basis
+            )
+            or not _strict_u64(
+                cumulative_net_proceeds
+            )
+            or not _strict_i64(
+                cumulative_realized_pnl
+            )
+            or not _strict_u64(
+                entry_slot
+            )
+            or (
+                entry_block_time is not None
+                and not _strict_u64(
+                    entry_block_time
+                )
+            )
+        ):
+            return finish(
+                UNKNOWN,
+                "OPEN_POSITION_ACCOUNTING_INVALID",
+                positions_loader_version=(
+                    OPEN_LIVE_POSITIONS_VERSION
+                ),
+            )
+
         current = inventory.setdefault(
             mint,
             {
                 "open_lots": 0,
                 "tokens_held": 0,
+
+                "total_entry_wallet_cost_lamports": 0,
+                "remaining_cost_basis_lamports": 0,
+
+                "cumulative_net_proceeds_lamports": 0,
+                "cumulative_realized_pnl_lamports": 0,
+
+                "oldest_entry_slot": None,
+                "newest_entry_slot": None,
+
+                "entry_block_times_complete": True,
+                "oldest_entry_block_time": None,
+                "newest_entry_block_time": None,
             },
         )
 
@@ -468,6 +583,34 @@ async def resolve_live_wallet_valuation(
         next_tokens = (
             current["tokens_held"]
             + tokens_held
+        )
+
+        next_entry_wallet_cost = (
+            current[
+                "total_entry_wallet_cost_lamports"
+            ]
+            + entry_wallet_cost
+        )
+
+        next_remaining_cost_basis = (
+            current[
+                "remaining_cost_basis_lamports"
+            ]
+            + remaining_cost_basis
+        )
+
+        next_cumulative_net_proceeds = (
+            current[
+                "cumulative_net_proceeds_lamports"
+            ]
+            + cumulative_net_proceeds
+        )
+
+        next_cumulative_realized_pnl = (
+            current[
+                "cumulative_realized_pnl_lamports"
+            ]
+            + cumulative_realized_pnl
         )
 
         if (
@@ -482,6 +625,32 @@ async def resolve_live_wallet_valuation(
                 ),
             )
 
+        if (
+            next_entry_wallet_cost > U64_MAX
+            or next_remaining_cost_basis > U64_MAX
+            or next_cumulative_net_proceeds > U64_MAX
+        ):
+            return finish(
+                UNKNOWN,
+                "OPEN_POSITION_ACCOUNTING_OVERFLOW",
+                positions_loader_version=(
+                    OPEN_LIVE_POSITIONS_VERSION
+                ),
+            )
+
+        if not (
+            I64_MIN
+            <= next_cumulative_realized_pnl
+            <= I64_MAX
+        ):
+            return finish(
+                UNKNOWN,
+                "OPEN_POSITION_REALIZED_PNL_OVERFLOW",
+                positions_loader_version=(
+                    OPEN_LIVE_POSITIONS_VERSION
+                ),
+            )
+
         current[
             "open_lots"
         ] = next_lots
@@ -489,6 +658,92 @@ async def resolve_live_wallet_valuation(
         current[
             "tokens_held"
         ] = next_tokens
+
+        current[
+            "total_entry_wallet_cost_lamports"
+        ] = next_entry_wallet_cost
+
+        current[
+            "remaining_cost_basis_lamports"
+        ] = next_remaining_cost_basis
+
+        current[
+            "cumulative_net_proceeds_lamports"
+        ] = next_cumulative_net_proceeds
+
+        current[
+            "cumulative_realized_pnl_lamports"
+        ] = next_cumulative_realized_pnl
+
+        if (
+            current["oldest_entry_slot"]
+            is None
+        ):
+            current[
+                "oldest_entry_slot"
+            ] = entry_slot
+
+            current[
+                "newest_entry_slot"
+            ] = entry_slot
+
+        else:
+            current[
+                "oldest_entry_slot"
+            ] = min(
+                current[
+                    "oldest_entry_slot"
+                ],
+                entry_slot,
+            )
+
+            current[
+                "newest_entry_slot"
+            ] = max(
+                current[
+                    "newest_entry_slot"
+                ],
+                entry_slot,
+            )
+
+        if entry_block_time is None:
+            current[
+                "entry_block_times_complete"
+            ] = False
+
+        else:
+            if (
+                current[
+                    "oldest_entry_block_time"
+                ]
+                is None
+            ):
+                current[
+                    "oldest_entry_block_time"
+                ] = entry_block_time
+
+                current[
+                    "newest_entry_block_time"
+                ] = entry_block_time
+
+            else:
+                current[
+                    "oldest_entry_block_time"
+                ] = min(
+                    current[
+                        "oldest_entry_block_time"
+                    ],
+                    entry_block_time,
+                )
+
+                current[
+                    "newest_entry_block_time"
+                ] = max(
+                    current[
+                        "newest_entry_block_time"
+                    ],
+                    entry_block_time,
+                )
 
     # --------------------------------------------------------
     # Native SOL cash authority
@@ -910,6 +1165,63 @@ async def resolve_live_wallet_valuation(
                 tokens_held=(
                     aggregate_tokens
                 ),
+
+                total_entry_wallet_cost_lamports=(
+                    mint_inventory[
+                        "total_entry_wallet_cost_lamports"
+                    ]
+                ),
+
+                remaining_cost_basis_lamports=(
+                    mint_inventory[
+                        "remaining_cost_basis_lamports"
+                    ]
+                ),
+
+                cumulative_net_proceeds_lamports=(
+                    mint_inventory[
+                        "cumulative_net_proceeds_lamports"
+                    ]
+                ),
+
+                cumulative_realized_pnl_lamports=(
+                    mint_inventory[
+                        "cumulative_realized_pnl_lamports"
+                    ]
+                ),
+
+                oldest_entry_slot=(
+                    mint_inventory[
+                        "oldest_entry_slot"
+                    ]
+                ),
+
+                newest_entry_slot=(
+                    mint_inventory[
+                        "newest_entry_slot"
+                    ]
+                ),
+
+                oldest_entry_block_time=(
+                    mint_inventory[
+                        "oldest_entry_block_time"
+                    ]
+                    if mint_inventory[
+                        "entry_block_times_complete"
+                    ]
+                    else None
+                ),
+
+                newest_entry_block_time=(
+                    mint_inventory[
+                        "newest_entry_block_time"
+                    ]
+                    if mint_inventory[
+                        "entry_block_times_complete"
+                    ]
+                    else None
+                ),
+
                 liquidation_value_lamports=(
                     value
                 ),

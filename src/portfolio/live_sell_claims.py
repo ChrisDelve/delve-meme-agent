@@ -32,6 +32,11 @@ from src.portfolio.live_sell_allocation import (
     LiveSellLotAllocation,
     plan_live_sell_allocation,
 )
+from src.portfolio.live_sell_authorization_records import (
+    PASS as AUTHORIZATION_RECORD_PASS,
+    _load_live_sell_authorization_record_in_transaction,
+    _persist_live_sell_authorization_record_in_transaction,
+)
 
 
 LIVE_SELL_INVENTORY_CLAIM_VERSION = (
@@ -1412,6 +1417,28 @@ def acquire_live_sell_inventory_claim(
                     claim=existing,
                 )
 
+            authorization_record = (
+                _persist_live_sell_authorization_record_in_transaction(
+                    connection=connection,
+                    authorization=authorization,
+                )
+            )
+
+            if (
+                authorization_record.status
+                != AUTHORIZATION_RECORD_PASS
+                or authorization_record.authorization
+                is None
+            ):
+                connection.rollback()
+
+                return finish(
+                    UNKNOWN,
+                    "SELL_AUTHORIZATION_RECORD_BIND_FAILED",
+                    *authorization_record.reasons,
+                    claim=existing,
+                )
+
             connection.commit()
 
             return finish(
@@ -1463,6 +1490,27 @@ def acquire_live_sell_inventory_claim(
             return finish(
                 UNKNOWN,
                 "SYSTEM_TIME_INVALID",
+            )
+
+        authorization_record = (
+            _persist_live_sell_authorization_record_in_transaction(
+                connection=connection,
+                authorization=authorization,
+            )
+        )
+
+        if (
+            authorization_record.status
+            != AUTHORIZATION_RECORD_PASS
+            or authorization_record.authorization
+            is None
+        ):
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_AUTHORIZATION_RECORD_BIND_FAILED",
+                *authorization_record.reasons,
             )
 
         allocation = (
@@ -1605,6 +1653,29 @@ def acquire_live_sell_inventory_claim(
             return finish(
                 UNKNOWN,
                 "SELL_CLAIM_ATOMIC_VERIFICATION_FAILED",
+            )
+
+        persisted_authorization = (
+            _load_live_sell_authorization_record_in_transaction(
+                connection=connection,
+                authorization_sha256=(
+                    authorization_sha256
+                ),
+            )
+        )
+
+        if (
+            persisted_authorization.status
+            != AUTHORIZATION_RECORD_PASS
+            or persisted_authorization.authorization
+            is None
+        ):
+            connection.rollback()
+
+            return finish(
+                UNKNOWN,
+                "SELL_AUTHORIZATION_RECORD_ATOMIC_VERIFICATION_FAILED",
+                *persisted_authorization.reasons,
             )
 
         connection.commit()

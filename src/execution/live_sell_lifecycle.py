@@ -240,6 +240,7 @@ async def advance_authorized_live_sell_once(
     network_validation: PumpSellV2PreSignValidation | None = None,
     signer: MessageSigner | None = None,
     abort_unexecuted: bool = False,
+    allow_submission: bool = True,
     db_path: Path = DB_PATH,
 ) -> LiveSellLifecycleResult:
     """
@@ -331,6 +332,16 @@ async def advance_authorized_live_sell_once(
             UNKNOWN,
             TERMINAL,
             "SELL_ABORT_FLAG_INVALID",
+        )
+
+    if not isinstance(
+        allow_submission,
+        bool,
+    ):
+        return finish(
+            UNKNOWN,
+            TERMINAL,
+            "SELL_ALLOW_SUBMISSION_FLAG_INVALID",
         )
 
     try:
@@ -1207,9 +1218,35 @@ async def advance_authorized_live_sell_once(
 
         #
         # Exact chain proof says the durable artifact is
-        # absent and still valid. The submission executor
-        # independently rechecks all authority before its
-        # one permitted relay attempt.
+        # absent and still valid.
+        #
+        # A caller may explicitly remove relay authority
+        # while preserving reconciliation authority. This
+        # is required for kill-safe recovery: already-landed
+        # transactions may still reconcile, but an absent
+        # signed artifact must not be broadcast.
+        #
+        if not allow_submission:
+            return finish(
+                HOLD,
+                RECONCILE,
+                "SELL_SUBMISSION_DISABLED",
+                *tuple(
+                    getattr(
+                        reconciliation,
+                        "reasons",
+                        (),
+                    )
+                ),
+                child_status=(
+                    reconciliation_status
+                ),
+            )
+
+        #
+        # Submission remains independently guarded by the
+        # submission executor, which rechecks all authority
+        # before its one permitted relay attempt.
         #
         try:
             submission = (

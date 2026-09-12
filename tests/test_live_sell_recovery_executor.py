@@ -355,6 +355,85 @@ class LiveSellRecoveryExecutorTests(
             db_path=self.db_path,
         )
 
+    async def test_reconcile_only_prefers_submitted_over_older_signed(
+        self,
+    ):
+        older_signed = self.candidate(
+            authorization_sha256=self.sha_a,
+            execution_status=SIGNED,
+        )
+
+        newer_submitted = self.candidate(
+            authorization_sha256=self.sha_b,
+            execution_status=SUBMITTED,
+        )
+
+        lifecycle = AsyncMock(
+            return_value=(
+                self.lifecycle(
+                    authorization_sha256=(
+                        self.sha_b
+                    ),
+                    status=(
+                        LIFECYCLE_RECONCILED
+                    ),
+                    stage="TERMINAL",
+                )
+            )
+        )
+
+        with (
+            patch(
+                f"{MODULE}.discover_live_sell_recovery_candidates",
+                return_value=(
+                    self.discovery(
+                        candidates=(
+                            older_signed,
+                            newer_submitted,
+                        )
+                    )
+                ),
+            ),
+            patch(
+                f"{MODULE}.advance_authorized_live_sell_once",
+                lifecycle,
+            ),
+        ):
+            result = (
+                await recover_one_live_sell_once(
+                    allow_submission=False,
+                    db_path=self.db_path,
+                )
+            )
+
+        self.assertEqual(
+            result.status,
+            RECONCILED,
+        )
+
+        self.assertEqual(
+            result.discovered_candidates,
+            2,
+        )
+
+        self.assertEqual(
+            result.authorization_sha256,
+            self.sha_b,
+        )
+
+        self.assertEqual(
+            result.execution_status,
+            SUBMITTED,
+        )
+
+        lifecycle.assert_awaited_once_with(
+            authorization=(
+                newer_submitted.authorization
+            ),
+            allow_submission=False,
+            db_path=self.db_path,
+        )
+
     async def test_reconciled_lifecycle_is_propagated(
         self,
     ):

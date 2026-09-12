@@ -159,6 +159,7 @@ def _candidate_contract_valid(
 
 async def recover_one_live_sell_once(
     *,
+    allow_submission: bool = True,
     db_path: Path = DB_PATH,
 ) -> LiveSellRecoveryExecutionResult:
     """
@@ -232,6 +233,15 @@ async def recover_one_live_sell_once(
             transaction_signature=(
                 transaction_signature
             ),
+        )
+
+    if not isinstance(
+        allow_submission,
+        bool,
+    ):
+        return finish(
+            UNKNOWN,
+            "LIVE_SELL_RECOVERY_ALLOW_SUBMISSION_INVALID",
         )
 
     try:
@@ -316,10 +326,31 @@ async def recover_one_live_sell_once(
         )
 
     #
-    # Discovery guarantees oldest signed artifact first.
-    # Deliberately execute only one candidate.
+    # Normal mode preserves discovery's oldest-artifact
+    # ordering.
     #
-    candidate = candidates[0]
+    # In reconciliation-only mode, an old SIGNED artifact
+    # that is absent-but-still-valid cannot be relayed and
+    # could otherwise permanently starve a newer
+    # SUBMISSION_ARMED / SUBMITTED transaction that needs
+    # reconciliation. Prefer already-relayed obligations
+    # while submission authority is disabled.
+    #
+    if allow_submission:
+        candidate = candidates[0]
+    else:
+        candidate = next(
+            (
+                item
+                for item in candidates
+                if item.execution_status
+                in (
+                    SUBMISSION_ARMED,
+                    SUBMITTED,
+                )
+            ),
+            candidates[0],
+        )
 
     if not _candidate_contract_valid(
         candidate
@@ -338,14 +369,25 @@ async def recover_one_live_sell_once(
     )
 
     try:
-        lifecycle = (
-            await advance_authorized_live_sell_once(
-                authorization=(
-                    candidate.authorization
-                ),
-                db_path=normalized_path,
+        if allow_submission:
+            lifecycle = (
+                await advance_authorized_live_sell_once(
+                    authorization=(
+                        candidate.authorization
+                    ),
+                    db_path=normalized_path,
+                )
             )
-        )
+        else:
+            lifecycle = (
+                await advance_authorized_live_sell_once(
+                    authorization=(
+                        candidate.authorization
+                    ),
+                    allow_submission=False,
+                    db_path=normalized_path,
+                )
+            )
 
     except Exception:
         return finish(

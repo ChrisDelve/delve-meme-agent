@@ -542,6 +542,78 @@ class LiveSellLifecycleTests(
         reconciliation.assert_awaited_once()
         submission.assert_awaited_once()
 
+    async def test_signed_absent_still_valid_with_submission_disabled_reconciles_without_relay(
+        self,
+    ):
+        reconciliation = AsyncMock(
+            return_value=SimpleNamespace(
+                status=RECONCILIATION_HOLD,
+                reasons=(
+                    "SELL_TRANSACTION_ABSENT_STILL_VALID",
+                ),
+                status_observation_state=(
+                    ABSENT_STILL_VALID
+                ),
+                transaction_signature="signature",
+            )
+        )
+
+        submission = AsyncMock()
+
+        contract_patches = (
+            self.common_contract_patches()
+        )
+
+        with (
+            contract_patches[0],
+            contract_patches[1],
+            contract_patches[2],
+            patch(
+                f"{MODULE}._load_claim_read_only",
+                return_value=self.active_claim,
+            ),
+            patch(
+                f"{MODULE}.load_live_sell_execution_record_read_only",
+                return_value=self.execution_result(
+                    self.signed_execution
+                ),
+            ),
+            patch(
+                f"{MODULE}.reconcile_live_sell",
+                new=reconciliation,
+            ),
+            patch(
+                f"{MODULE}.submit_pump_sell_v2_once",
+                new=submission,
+            ),
+        ):
+            result = await self.run_lifecycle(
+                allow_submission=False,
+            )
+
+        self.assertEqual(
+            result.status,
+            HOLD,
+        )
+
+        self.assertEqual(
+            result.stage,
+            RECONCILE,
+        )
+
+        self.assertIn(
+            "SELL_SUBMISSION_DISABLED",
+            result.reasons,
+        )
+
+        self.assertIn(
+            "SELL_TRANSACTION_ABSENT_STILL_VALID",
+            result.reasons,
+        )
+
+        reconciliation.assert_awaited_once()
+        submission.assert_not_awaited()
+
     async def test_signed_known_transaction_reconciles_without_submission(
         self,
     ):

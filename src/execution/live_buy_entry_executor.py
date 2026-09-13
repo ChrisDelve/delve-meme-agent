@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.execution.execution_quality_gate import (
-    ExecutionQualityResult,
+    ABORT as EXECUTION_ABORT,
+    GATE_VERSION as EXECUTION_GATE_VERSION,
+    PASS as EXECUTION_PASS,
+    UNKNOWN as EXECUTION_UNKNOWN,
+    curve_state_from_live_curve,
+    evaluate_execution_quality,
 )
 from src.execution.live_blockhash_context import (
     LIVE_BLOCKHASH_CONTEXT_VERSION,
@@ -55,9 +60,6 @@ from src.execution.pump_buy_v2_unsigned_message import (
     PUMP_BUY_V2_UNSIGNED_MESSAGE_VERSION,
     build_unsigned_pump_buy_v2_message,
 )
-from src.execution.pump_execution_simulator import (
-    PumpCurveState,
-)
 from src.portfolio.live_pump_buy_reservation import (
     BLOCK as RESERVATION_BLOCK,
     PASS as RESERVATION_PASS,
@@ -74,12 +76,15 @@ from src.risk.risk_governor import (
     RiskPolicy,
 )
 from src.safety.token_safety_gate import (
+    PASS as SAFETY_PASS,
+    REJECT as SAFETY_REJECT,
+    UNKNOWN as SAFETY_UNKNOWN,
     TokenSafetyGateResult,
 )
 
 
 LIVE_BUY_ENTRY_EXECUTOR_VERSION = (
-    "live-buy-entry-executor-v1"
+    "live-buy-entry-executor-v2"
 )
 
 SIGNED = "SIGNED"
@@ -88,6 +93,7 @@ UNKNOWN = "UNKNOWN"
 
 VALIDATE = "VALIDATE"
 RESERVE = "RESERVE"
+EXECUTION = "EXECUTION"
 AUTHORIZE = "AUTHORIZE"
 GLOBAL_STATE = "GLOBAL_STATE"
 ACCOUNT_CONTEXT = "ACCOUNT_CONTEXT"
@@ -224,10 +230,11 @@ async def execute_live_buy_entry_once(
 
     protected_cash_lamports: int,
 
-    curve_state: PumpCurveState,
     live_curve: LivePumpCurveState,
     safety: TokenSafetyGateResult,
-    execution: ExecutionQualityResult,
+
+    signal_virtual_quote_reserves: int,
+    signal_virtual_token_reserves: int,
 
     protocol_fee_bps: int,
     creator_fee_bps: int,
@@ -247,7 +254,7 @@ async def execute_live_buy_entry_once(
     compute_unit_limit: int,
     signer: MessageSigner | None,
 
-    policy: RiskPolicy | None = None,
+    policy: RiskPolicy,
     min_context_slot: int | None = None,
     db_path: Path = DB_PATH,
 ) -> LiveBuyEntryExecutionResult:
@@ -360,6 +367,148 @@ async def execute_live_buy_entry_once(
             UNKNOWN,
             VALIDATE,
             "LIVE_BUY_SIGNER_REQUIRED",
+        )
+
+    #
+    # Production entry authority may not silently inherit the
+    # generic/shadow RiskPolicy defaults.
+    #
+    if not isinstance(
+        policy,
+        RiskPolicy,
+    ):
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_POLICY_REQUIRED",
+        )
+
+    signal_quote_reserves = _positive_int(
+        signal_virtual_quote_reserves
+    )
+
+    signal_token_reserves = _positive_int(
+        signal_virtual_token_reserves
+    )
+
+    if (
+        signal_quote_reserves is None
+        or signal_token_reserves is None
+    ):
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_SIGNAL_RESERVES_INVALID",
+        )
+
+    #
+    # Safety evidence already exists before this bounded
+    # capital-authority path. Malformed/non-PASS evidence must
+    # not create an ACTIVE reservation.
+    #
+    safety_status = getattr(
+        safety,
+        "status",
+        None,
+    )
+
+    safety_snapshot = getattr(
+        safety,
+        "snapshot",
+        None,
+    )
+
+    safety_reasons = tuple(
+        getattr(
+            safety,
+            "reasons",
+            (),
+        )
+        or ()
+    )
+
+    if safety_status == SAFETY_REJECT:
+        return finish(
+            BLOCK,
+            VALIDATE,
+            "LIVE_BUY_SAFETY_REJECTED",
+            *safety_reasons,
+        )
+
+    if safety_status == SAFETY_UNKNOWN:
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_SAFETY_UNKNOWN",
+            *safety_reasons,
+        )
+
+    if safety_status != SAFETY_PASS:
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_SAFETY_STATUS_INVALID",
+        )
+
+    if safety_snapshot is None:
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_SAFETY_SNAPSHOT_MISSING",
+        )
+
+    if (
+        _nonempty_text(
+            getattr(
+                safety_snapshot,
+                "mint",
+                None,
+            )
+        )
+        != normalized_mint
+    ):
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_SAFETY_MINT_MISMATCH",
+        )
+
+    if (
+        _nonempty_text(
+            getattr(
+                live_curve,
+                "mint",
+                None,
+            )
+        )
+        != normalized_mint
+    ):
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_CURVE_MINT_MISMATCH",
+        )
+
+    #
+    # One market-state object owns both:
+    #
+    #   - reservation/risk simulation; and
+    #   - execution-quality simulation.
+    #
+    # Do not accept a second caller-supplied PumpCurveState.
+    #
+    try:
+        curve_state = (
+            curve_state_from_live_curve(
+                live_curve
+            )
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_CURVE_STATE_DERIVATION_FAILED",
         )
 
     compute_limit = _positive_int(
@@ -600,10 +749,174 @@ async def execute_live_buy_entry_once(
         reservation_id_value
     )
 
+    reserved_spend = _positive_int(
+        getattr(
+            reservation,
+            "spend_lamports",
+            None,
+        )
+    )
+
+    if reserved_spend is None:
+        return finish(
+            UNKNOWN,
+            RESERVE,
+            "LIVE_BUY_RESERVED_SPEND_INVALID",
+        )
+
     #
     # --------------------------------------------------------
-    # 2. Immutable BUY authorization bound to the exact
-    #    ACTIVE reservation.
+    # 2. Execution quality for the EXACT atomically reserved
+    #    spend.
+    #
+    # Reservation v6 has already accounted for concurrent
+    # ACTIVE/SIGNED/SUBMITTED liabilities while holding its
+    # BEGIN IMMEDIATE transaction. That reserved spend is now
+    # the only order size execution evidence may evaluate.
+    # --------------------------------------------------------
+    #
+    try:
+        execution = evaluate_execution_quality(
+            snapshot=safety_snapshot,
+            live_curve=live_curve,
+            signal_virtual_quote_reserves=(
+                signal_quote_reserves
+            ),
+            signal_virtual_token_reserves=(
+                signal_token_reserves
+            ),
+            spendable_quote_in=(
+                reserved_spend
+            ),
+            protocol_fee_bps=(
+                protocol_fee_bps
+            ),
+            creator_fee_bps=(
+                creator_fee_bps
+            ),
+            slippage_bps=(
+                buy_slippage_bps
+            ),
+            base_network_fee_lamports=(
+                buy_base_network_fee_lamports
+            ),
+            priority_fee_lamports=(
+                buy_priority_fee_lamports
+            ),
+            rent_lamports=(
+                buy_rent_lamports
+            ),
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            EXECUTION,
+            "LIVE_BUY_EXECUTION_QUALITY_EXCEPTION",
+        )
+
+    execution_version = getattr(
+        execution,
+        "gate_version",
+        None,
+    )
+
+    execution_status = getattr(
+        execution,
+        "status",
+        None,
+    )
+
+    execution_reasons = tuple(
+        getattr(
+            execution,
+            "reasons",
+            (),
+        )
+        or ()
+    )
+
+    if (
+        execution_version
+        != EXECUTION_GATE_VERSION
+        or getattr(
+            execution,
+            "mint",
+            None,
+        )
+        != normalized_mint
+        or getattr(
+            execution,
+            "spendable_quote_in",
+            None,
+        )
+        != reserved_spend
+        or getattr(
+            execution,
+            "protocol_fee_bps",
+            None,
+        )
+        != protocol_fee_bps
+        or getattr(
+            execution,
+            "creator_fee_bps",
+            None,
+        )
+        != creator_fee_bps
+        or getattr(
+            execution,
+            "slippage_bps",
+            None,
+        )
+        != buy_slippage_bps
+    ):
+        return finish(
+            UNKNOWN,
+            EXECUTION,
+            "LIVE_BUY_EXECUTION_BINDING_MISMATCH",
+        )
+
+    if execution_status == EXECUTION_ABORT:
+        return finish(
+            BLOCK,
+            EXECUTION,
+            *execution_reasons,
+        )
+
+    if execution_status == EXECUTION_UNKNOWN:
+        return finish(
+            UNKNOWN,
+            EXECUTION,
+            *execution_reasons,
+        )
+
+    if execution_status != EXECUTION_PASS:
+        return finish(
+            UNKNOWN,
+            EXECUTION,
+            "LIVE_BUY_EXECUTION_STATUS_INVALID",
+        )
+
+    if getattr(
+        execution,
+        "simulation",
+        None,
+    ) is None:
+        return finish(
+            UNKNOWN,
+            EXECUTION,
+            "LIVE_BUY_EXECUTION_PASS_SIMULATION_MISSING",
+        )
+
+    #
+    # --------------------------------------------------------
+    # 3. Immutable BUY authorization bound to BOTH:
+    #
+    #      - the exact ACTIVE reservation; and
+    #      - the exact execution simulation above.
+    #
+    # authorize_pump_buy() independently proves the execution
+    # spend and simulation fingerprint against Reservation-v6.
     # --------------------------------------------------------
     #
     try:
@@ -1161,7 +1474,7 @@ async def execute_live_buy_entry_once(
 
     #
     # --------------------------------------------------------
-    # 8. Exact execution simulation/preflight.
+    # 9. Exact execution simulation/preflight.
     # --------------------------------------------------------
     #
     try:
@@ -1239,7 +1552,7 @@ async def execute_live_buy_entry_once(
 
     #
     # --------------------------------------------------------
-    # 9. Sign and durably bind. STOP after SIGNED.
+    # 10. Sign and durably bind. STOP after SIGNED.
     # --------------------------------------------------------
     #
     try:

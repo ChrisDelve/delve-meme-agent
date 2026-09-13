@@ -4,9 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from src.execution.execution_quality_gate import (
-    ExecutionQualityResult,
-)
 from src.execution.live_buy_entry_executor import (
     BLOCK as ENTRY_BLOCK,
     SIGNED as ENTRY_SIGNED,
@@ -32,9 +29,6 @@ from src.execution.live_curve_state import (
 from src.execution.pump_buy_v2_signing import (
     MessageSigner,
 )
-from src.execution.pump_execution_simulator import (
-    PumpCurveState,
-)
 from src.portfolio.live_reservations import (
     DB_PATH,
 )
@@ -47,7 +41,7 @@ from src.safety.token_safety_gate import (
 
 
 LIVE_BUY_RUNTIME_VERSION = (
-    "live-buy-runtime-v1"
+    "live-buy-runtime-v2"
 )
 
 IDLE = "IDLE"
@@ -165,10 +159,11 @@ async def run_live_buy_once(
 
     protected_cash_lamports: int,
 
-    curve_state: PumpCurveState,
     live_curve: LivePumpCurveState,
     safety: TokenSafetyGateResult,
-    execution: ExecutionQualityResult,
+
+    signal_virtual_quote_reserves: int | None = None,
+    signal_virtual_token_reserves: int | None = None,
 
     protocol_fee_bps: int,
     creator_fee_bps: int,
@@ -407,10 +402,14 @@ async def run_live_buy_once(
                 protected_cash_lamports=(
                     protected_cash_lamports
                 ),
-                curve_state=curve_state,
                 live_curve=live_curve,
                 safety=safety,
-                execution=execution,
+                signal_virtual_quote_reserves=(
+                    signal_virtual_quote_reserves
+                ),
+                signal_virtual_token_reserves=(
+                    signal_virtual_token_reserves
+                ),
                 protocol_fee_bps=(
                     protocol_fee_bps
                 ),

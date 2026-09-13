@@ -41,6 +41,10 @@ from src.execution.live_buy_runtime import (
 )
 
 
+from src.risk.risk_governor import (
+    RiskPolicy,
+)
+
 MODULE = (
     "src.execution.live_buy_runtime"
 )
@@ -59,10 +63,17 @@ class LiveBuyRuntimeTests(
 
         self.signer = object()
 
-        self.curve_state = object()
         self.live_curve = object()
         self.safety = object()
-        self.execution = object()
+
+        self.signal_virtual_quote_reserves = (
+            50_000_000_000
+        )
+        self.signal_virtual_token_reserves = (
+            100_000_000_000
+        )
+
+        self.policy = RiskPolicy()
 
     def recovery(
         self,
@@ -146,10 +157,14 @@ class LiveBuyRuntimeTests(
             mint=self.mint,
             wallet_pubkey=self.wallet,
             protected_cash_lamports=0,
-            curve_state=self.curve_state,
             live_curve=self.live_curve,
             safety=self.safety,
-            execution=self.execution,
+            signal_virtual_quote_reserves=(
+                self.signal_virtual_quote_reserves
+            ),
+            signal_virtual_token_reserves=(
+                self.signal_virtual_token_reserves
+            ),
             protocol_fee_bps=100,
             creator_fee_bps=50,
             buy_slippage_bps=500,
@@ -165,6 +180,7 @@ class LiveBuyRuntimeTests(
                 compute_unit_limit
             ),
             signer=signer,
+            policy=self.policy,
             min_context_slot=90,
             db_path=db_path,
         )
@@ -174,7 +190,7 @@ class LiveBuyRuntimeTests(
     ):
         self.assertEqual(
             LIVE_BUY_RUNTIME_VERSION,
-            "live-buy-runtime-v1",
+            "live-buy-runtime-v2",
         )
 
     async def test_invalid_kill_switch_fails_before_recovery(
@@ -225,6 +241,68 @@ class LiveBuyRuntimeTests(
             result = await self.invoke(
                 signer=None,
                 compute_unit_limit=0,
+            )
+
+        self.assertEqual(
+            result.status,
+            HOLD,
+        )
+        self.assertEqual(
+            result.stage,
+            RECOVERY,
+        )
+
+        recovery.assert_awaited_once_with(
+            allow_submission=True,
+            db_path=self.db_path,
+        )
+
+        entry.assert_not_awaited()
+
+    async def test_recovery_runs_when_new_v2_inputs_are_omitted(
+        self,
+    ):
+        recovery = AsyncMock(
+            return_value=self.recovery(
+                status=RECOVERY_HOLD,
+                reasons=("RECOVERY_HOLD",),
+            )
+        )
+
+        entry = AsyncMock()
+
+        with (
+            patch(
+                f"{MODULE}.recover_one_live_buy_once",
+                new=recovery,
+            ),
+            patch(
+                f"{MODULE}.execute_live_buy_entry_once",
+                new=entry,
+            ),
+        ):
+            result = await run_live_buy_once(
+                kill_switch=False,
+                mint=self.mint,
+                wallet_pubkey=self.wallet,
+                protected_cash_lamports=0,
+                live_curve=self.live_curve,
+                safety=self.safety,
+                protocol_fee_bps=100,
+                creator_fee_bps=50,
+                buy_slippage_bps=500,
+                buy_base_network_fee_lamports=5_000,
+                buy_priority_fee_lamports=7_000,
+                buy_rent_lamports=2_000,
+                exit_slippage_bps=500,
+                exit_base_network_fee_lamports=5_000,
+                exit_priority_fee_lamports=7_000,
+                reservation_ttl_seconds=30.0,
+                max_authorization_age_seconds=30.0,
+                compute_unit_limit=0,
+                signer=None,
+                min_context_slot=90,
+                db_path=self.db_path,
             )
 
         self.assertEqual(
@@ -829,9 +907,11 @@ class LiveBuyRuntimeTests(
             kwargs["wallet_pubkey"],
             self.wallet,
         )
-        self.assertIs(
-            kwargs["curve_state"],
-            self.curve_state,
+        self.assertEqual(
+            kwargs[
+                "signal_virtual_quote_reserves"
+            ],
+            self.signal_virtual_quote_reserves,
         )
         self.assertIs(
             kwargs["live_curve"],
@@ -841,9 +921,16 @@ class LiveBuyRuntimeTests(
             kwargs["safety"],
             self.safety,
         )
+        self.assertEqual(
+            kwargs[
+                "signal_virtual_token_reserves"
+            ],
+            self.signal_virtual_token_reserves,
+        )
+
         self.assertIs(
-            kwargs["execution"],
-            self.execution,
+            kwargs["policy"],
+            self.policy,
         )
         self.assertIs(
             kwargs["signer"],

@@ -10,6 +10,12 @@ from unittest.mock import (
     patch,
 )
 
+from src.execution.execution_quality_gate import (
+    ABORT as EXECUTION_ABORT,
+    GATE_VERSION as EXECUTION_GATE_VERSION,
+    PASS as EXECUTION_PASS,
+    UNKNOWN as EXECUTION_UNKNOWN,
+)
 from src.execution.live_blockhash_context import (
     LIVE_BLOCKHASH_CONTEXT_VERSION,
 )
@@ -76,9 +82,21 @@ from src.portfolio.live_reservations import (
 )
 
 
+from src.risk.risk_governor import (
+    RiskPolicy,
+)
+
+from src.safety.token_safety_gate import (
+    REJECT as SAFETY_REJECT,
+    UNKNOWN as SAFETY_UNKNOWN,
+)
+
 MODULE = (
     "src.execution.live_buy_entry_executor"
 )
+
+_DEFAULT_POLICY = object()
+_DEFAULT_SIMULATION = object()
 
 
 class LiveBuyEntryExecutorTests(
@@ -177,6 +195,84 @@ class LiveBuyEntryExecutorTests(
             wallet_pubkey=self.wallet,
             mint=self.mint,
             reservation_decision=decision,
+        )
+
+    def live_curve_result(
+        self,
+    ):
+        return SimpleNamespace(
+            mint=self.mint,
+            rpc_slot=self.curve_slot,
+            fetched_at=123.0,
+            curve=SimpleNamespace(
+                virtual_quote_reserves=(
+                    50_000_000_000
+                ),
+                virtual_token_reserves=(
+                    100_000_000_000
+                ),
+                real_quote_reserves=(
+                    40_000_000_000
+                ),
+                real_token_reserves=(
+                    80_000_000_000
+                ),
+                complete=False,
+            ),
+        )
+
+    def safety_result(
+        self,
+    ):
+        return SimpleNamespace(
+            status="PASS",
+            reasons=(),
+            snapshot=SimpleNamespace(
+                mint=self.mint,
+            ),
+        )
+
+    def execution_result(
+        self,
+        *,
+        status=EXECUTION_PASS,
+        reasons=(),
+        spend_lamports=None,
+        simulation=_DEFAULT_SIMULATION,
+        **updates,
+    ):
+        if spend_lamports is None:
+            spend_lamports = (
+                self.reservation.spend_lamports
+            )
+
+        if simulation is _DEFAULT_SIMULATION:
+            simulation = object()
+
+        data = dict(
+            gate_version=(
+                EXECUTION_GATE_VERSION
+            ),
+            mint=self.mint,
+            status=status,
+            reasons=tuple(
+                reasons
+            ),
+            spendable_quote_in=(
+                spend_lamports
+            ),
+            protocol_fee_bps=100,
+            creator_fee_bps=50,
+            slippage_bps=500,
+            simulation=simulation,
+        )
+
+        data.update(
+            updates
+        )
+
+        return SimpleNamespace(
+            **data
         )
 
     def authorization(
@@ -459,6 +555,7 @@ class LiveBuyEntryExecutorTests(
         self,
         *,
         reservation=None,
+        execution=None,
         authorization=None,
         global_state=None,
         context=None,
@@ -471,6 +568,11 @@ class LiveBuyEntryExecutorTests(
         if reservation is None:
             reservation = (
                 self.reservation_result()
+            )
+
+        if execution is None:
+            execution = (
+                self.execution_result()
             )
 
         if authorization is None:
@@ -505,6 +607,9 @@ class LiveBuyEntryExecutorTests(
             "reserve": AsyncMock(
                 return_value=reservation
             ),
+            "execution": Mock(
+                return_value=execution
+            ),
             "authorize": Mock(
                 return_value=authorization
             ),
@@ -535,6 +640,10 @@ class LiveBuyEntryExecutorTests(
             patch(
                 f"{MODULE}.reserve_live_pump_buy",
                 new=mocks["reserve"],
+            ),
+            patch(
+                f"{MODULE}.evaluate_execution_quality",
+                new=mocks["execution"],
             ),
             patch(
                 f"{MODULE}.authorize_pump_buy",
@@ -577,6 +686,15 @@ class LiveBuyEntryExecutorTests(
         signer=None,
         compute_unit_limit=None,
         max_authorization_age_seconds=30.0,
+        policy=_DEFAULT_POLICY,
+        signal_virtual_quote_reserves=(
+            50_000_000_000
+        ),
+        signal_virtual_token_reserves=(
+            100_000_000_000
+        ),
+        live_curve=None,
+        safety=None,
     ):
         if signer is None:
             signer = self.signer
@@ -586,14 +704,31 @@ class LiveBuyEntryExecutorTests(
                 self.compute_unit_limit
             )
 
+        if policy is _DEFAULT_POLICY:
+            policy = RiskPolicy()
+
+        if live_curve is None:
+            live_curve = (
+                self.live_curve_result()
+            )
+
+        if safety is None:
+            safety = (
+                self.safety_result()
+            )
+
         return await execute_live_buy_entry_once(
             mint=self.mint,
             wallet_pubkey=self.wallet,
             protected_cash_lamports=0,
-            curve_state=object(),
-            live_curve=object(),
-            safety=object(),
-            execution=object(),
+            live_curve=live_curve,
+            safety=safety,
+            signal_virtual_quote_reserves=(
+                signal_virtual_quote_reserves
+            ),
+            signal_virtual_token_reserves=(
+                signal_virtual_token_reserves
+            ),
             protocol_fee_bps=100,
             creator_fee_bps=50,
             buy_slippage_bps=500,
@@ -611,6 +746,7 @@ class LiveBuyEntryExecutorTests(
                 compute_unit_limit
             ),
             signer=signer,
+            policy=policy,
             min_context_slot=90,
             db_path=self.db_path,
         )
@@ -620,7 +756,7 @@ class LiveBuyEntryExecutorTests(
     ):
         self.assertEqual(
             LIVE_BUY_ENTRY_EXECUTOR_VERSION,
-            "live-buy-entry-executor-v1",
+            "live-buy-entry-executor-v2",
         )
 
     async def test_signer_required_before_reservation(
@@ -637,10 +773,18 @@ class LiveBuyEntryExecutorTests(
                     mint=self.mint,
                     wallet_pubkey=self.wallet,
                     protected_cash_lamports=0,
-                    curve_state=object(),
-                    live_curve=object(),
-                    safety=object(),
-                    execution=object(),
+                    live_curve=(
+                        self.live_curve_result()
+                    ),
+                    safety=(
+                        self.safety_result()
+                    ),
+                    signal_virtual_quote_reserves=(
+                        50_000_000_000
+                    ),
+                    signal_virtual_token_reserves=(
+                        100_000_000_000
+                    ),
                     protocol_fee_bps=100,
                     creator_fee_bps=50,
                     buy_slippage_bps=500,
@@ -654,6 +798,7 @@ class LiveBuyEntryExecutorTests(
                     max_authorization_age_seconds=30.0,
                     compute_unit_limit=250_000,
                     signer=None,
+                    policy=RiskPolicy(),
                     db_path=self.db_path,
                 )
             )
@@ -694,6 +839,311 @@ class LiveBuyEntryExecutorTests(
             VALIDATE,
         )
         reserve.assert_not_awaited()
+
+    async def test_explicit_policy_required_before_reservation(
+        self,
+    ):
+        reserve = AsyncMock()
+
+        with patch(
+            f"{MODULE}.reserve_live_pump_buy",
+            new=reserve,
+        ):
+            result = await self.invoke(
+                policy=None
+            )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            VALIDATE,
+        )
+        self.assertIn(
+            "LIVE_BUY_POLICY_REQUIRED",
+            result.reasons,
+        )
+
+        reserve.assert_not_awaited()
+
+    async def test_invalid_signal_reserves_fail_before_reservation(
+        self,
+    ):
+        reserve = AsyncMock()
+
+        with patch(
+            f"{MODULE}.reserve_live_pump_buy",
+            new=reserve,
+        ):
+            result = await self.invoke(
+                signal_virtual_quote_reserves=0
+            )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            VALIDATE,
+        )
+        self.assertIn(
+            "LIVE_BUY_SIGNAL_RESERVES_INVALID",
+            result.reasons,
+        )
+
+        reserve.assert_not_awaited()
+
+    async def test_rejected_safety_blocks_before_reservation(
+        self,
+    ):
+        reserve = AsyncMock()
+
+        safety = SimpleNamespace(
+            status=SAFETY_REJECT,
+            reasons=("ACTIVE_MINT_AUTHORITY",),
+            snapshot=SimpleNamespace(
+                mint=self.mint,
+            ),
+        )
+
+        with patch(
+            f"{MODULE}.reserve_live_pump_buy",
+            new=reserve,
+        ):
+            result = await self.invoke(
+                safety=safety
+            )
+
+        self.assertEqual(
+            result.status,
+            BLOCK,
+        )
+        self.assertEqual(
+            result.stage,
+            VALIDATE,
+        )
+        self.assertIn(
+            "LIVE_BUY_SAFETY_REJECTED",
+            result.reasons,
+        )
+        self.assertIn(
+            "ACTIVE_MINT_AUTHORITY",
+            result.reasons,
+        )
+
+        reserve.assert_not_awaited()
+
+    async def test_unknown_safety_fails_before_reservation(
+        self,
+    ):
+        reserve = AsyncMock()
+
+        safety = SimpleNamespace(
+            status=SAFETY_UNKNOWN,
+            reasons=(
+                "TOKEN_SAFETY_RESOLUTION_FAILED",
+            ),
+            snapshot=None,
+        )
+
+        with patch(
+            f"{MODULE}.reserve_live_pump_buy",
+            new=reserve,
+        ):
+            result = await self.invoke(
+                safety=safety
+            )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            VALIDATE,
+        )
+        self.assertIn(
+            "LIVE_BUY_SAFETY_UNKNOWN",
+            result.reasons,
+        )
+        self.assertIn(
+            "TOKEN_SAFETY_RESOLUTION_FAILED",
+            result.reasons,
+        )
+
+        reserve.assert_not_awaited()
+
+    async def test_execution_quality_uses_exact_reserved_spend(
+        self,
+    ):
+        with self.orchestration() as mocks:
+            result = await self.invoke()
+
+        self.assertEqual(
+            result.status,
+            SIGNED,
+        )
+
+        execution_kwargs = (
+            mocks["execution"]
+            .call_args
+            .kwargs
+        )
+
+        self.assertEqual(
+            execution_kwargs[
+                "spendable_quote_in"
+            ],
+            self.reservation.spend_lamports,
+        )
+
+        authorize_kwargs = (
+            mocks["authorize"]
+            .call_args
+            .kwargs
+        )
+
+        self.assertEqual(
+            authorize_kwargs[
+                "requested_spend_lamports"
+            ],
+            self.reservation.spend_lamports,
+        )
+
+        self.assertIs(
+            authorize_kwargs["execution"],
+            mocks["execution"].return_value,
+        )
+
+    async def test_execution_abort_blocks_before_authorization(
+        self,
+    ):
+        execution = self.execution_result(
+            status=EXECUTION_ABORT,
+            reasons=(
+                "OWN_PRICE_IMPACT_TOO_HIGH",
+            ),
+        )
+
+        with self.orchestration(
+            execution=execution
+        ) as mocks:
+            result = await self.invoke()
+
+        self.assertEqual(
+            result.status,
+            BLOCK,
+        )
+        self.assertEqual(
+            result.stage,
+            "EXECUTION",
+        )
+        self.assertIn(
+            "OWN_PRICE_IMPACT_TOO_HIGH",
+            result.reasons,
+        )
+
+        mocks[
+            "authorize"
+        ].assert_not_called()
+
+    async def test_execution_unknown_stops_before_authorization(
+        self,
+    ):
+        execution = self.execution_result(
+            status=EXECUTION_UNKNOWN,
+            reasons=(
+                "LIVE_CURVE_STATE_STALE",
+            ),
+        )
+
+        with self.orchestration(
+            execution=execution
+        ) as mocks:
+            result = await self.invoke()
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            "EXECUTION",
+        )
+        self.assertIn(
+            "LIVE_CURVE_STATE_STALE",
+            result.reasons,
+        )
+
+        mocks[
+            "authorize"
+        ].assert_not_called()
+
+    async def test_execution_binding_mismatch_fails_closed(
+        self,
+    ):
+        execution = self.execution_result(
+            spend_lamports=(
+                self.reservation
+                .spend_lamports
+                + 1
+            ),
+        )
+
+        with self.orchestration(
+            execution=execution
+        ) as mocks:
+            result = await self.invoke()
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            "EXECUTION",
+        )
+        self.assertIn(
+            "LIVE_BUY_EXECUTION_BINDING_MISMATCH",
+            result.reasons,
+        )
+
+        mocks[
+            "authorize"
+        ].assert_not_called()
+
+    async def test_execution_pass_without_simulation_fails_closed(
+        self,
+    ):
+        execution = self.execution_result(
+            status=EXECUTION_PASS,
+            simulation=None,
+        )
+
+        with self.orchestration(
+            execution=execution
+        ) as mocks:
+            result = await self.invoke()
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            "EXECUTION",
+        )
+        self.assertIn(
+            "LIVE_BUY_EXECUTION_PASS_SIMULATION_MISSING",
+            result.reasons,
+        )
+
+        mocks[
+            "authorize"
+        ].assert_not_called()
 
     async def test_reservation_block_stops_pipeline(
         self,

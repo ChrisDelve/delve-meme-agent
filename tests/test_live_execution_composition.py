@@ -46,6 +46,7 @@ class LiveExecutionCompositionTests(
 
         self.live_curve = object()
         self.safety = object()
+        self.candidate = object()
 
         self.authority_gate = (
             LiveAuthorityGate()
@@ -73,6 +74,7 @@ class LiveExecutionCompositionTests(
         self,
     ) -> dict:
         return {
+            "candidate": self.candidate,
             "mint": "mint",
             "wallet_pubkey": self.wallet,
             "protected_cash_lamports": 123_000_000,
@@ -134,7 +136,7 @@ class LiveExecutionCompositionTests(
     ):
         self.assertEqual(
             LIVE_EXECUTION_COMPOSITION_VERSION,
-            "live-execution-composition-v2",
+            "live-execution-composition-v3",
         )
 
     async def test_invalid_buy_config_stops_before_signer_and_runtime(
@@ -265,6 +267,7 @@ class LiveExecutionCompositionTests(
 
         runtime.assert_awaited_once_with(
             kill_switch=True,
+            candidate=inputs["candidate"],
             mint=inputs["mint"],
             wallet_pubkey=inputs[
                 "wallet_pubkey"

@@ -19,6 +19,10 @@ from src.execution.live_blockhash_context import (
 from src.execution.live_curve_state import (
     LivePumpCurveState,
 )
+from src.execution.model_entry_candidate import (
+    MODEL_ENTRY_CANDIDATE_VERSION,
+    ModelEntryCandidate,
+)
 from src.execution.live_pump_global_state import (
     LIVE_PUMP_GLOBAL_STATE_VERSION,
     resolve_live_pump_global_state,
@@ -60,6 +64,15 @@ from src.execution.pump_buy_v2_unsigned_message import (
     PUMP_BUY_V2_UNSIGNED_MESSAGE_VERSION,
     build_unsigned_pump_buy_v2_message,
 )
+from src.portfolio.live_entry_admissions import (
+    BLOCK as ADMISSION_BLOCK,
+    PASS as ADMISSION_PASS,
+    UNKNOWN as ADMISSION_UNKNOWN,
+    LIVE_ENTRY_ADMISSION_VERSION,
+    LiveEntryAdmission,
+    LiveEntryAdmissionResult,
+    acquire_live_entry_admission,
+)
 from src.portfolio.live_pump_buy_reservation import (
     BLOCK as RESERVATION_BLOCK,
     PASS as RESERVATION_PASS,
@@ -84,7 +97,7 @@ from src.safety.token_safety_gate import (
 
 
 LIVE_BUY_ENTRY_EXECUTOR_VERSION = (
-    "live-buy-entry-executor-v2"
+    "live-buy-entry-executor-v3"
 )
 
 SIGNED = "SIGNED"
@@ -92,6 +105,7 @@ BLOCK = "BLOCK"
 UNKNOWN = "UNKNOWN"
 
 VALIDATE = "VALIDATE"
+ADMISSION = "ADMISSION"
 RESERVE = "RESERVE"
 EXECUTION = "EXECUTION"
 AUTHORIZE = "AUTHORIZE"
@@ -155,6 +169,56 @@ def _valid_sha256(
             in "0123456789abcdef"
             for character in value
         )
+    )
+
+
+def _admission_matches_candidate(
+    *,
+    admission: object,
+    candidate: ModelEntryCandidate,
+    candidate_sha256: str,
+) -> bool:
+    return (
+        isinstance(
+            admission,
+            LiveEntryAdmission,
+        )
+        and admission.admission_version
+        == LIVE_ENTRY_ADMISSION_VERSION
+        and admission.candidate_version
+        == candidate.candidate_version
+        and admission.candidate_sha256
+        == candidate_sha256
+        and admission.entry_signature
+        == candidate.entry_signature
+        and admission.mint
+        == candidate.mint
+        and admission.event_user
+        == candidate.event_user
+        and admission.quote_mint
+        == candidate.quote_mint
+        and admission.slot
+        == candidate.slot
+        and admission.trade_timestamp
+        == candidate.trade_timestamp
+        and admission.observed_at
+        == candidate.observed_at
+        and admission.predicted_at
+        == candidate.predicted_at
+        and admission.model_shadow_version
+        == candidate.model_shadow_version
+        and admission.artifact_version
+        == candidate.artifact_version
+        and admission.artifact_sha256
+        == candidate.artifact_sha256
+        and admission.model_eligible
+        is candidate.model_eligible
+        and admission.probability_2x_15m
+        == candidate.probability_2x_15m
+        and admission.signal_virtual_quote_reserves
+        == candidate.signal_virtual_quote_reserves
+        and admission.signal_virtual_token_reserves
+        == candidate.signal_virtual_token_reserves
     )
 
 
@@ -233,6 +297,8 @@ async def execute_live_buy_entry_once(
     live_curve: LivePumpCurveState,
     safety: TokenSafetyGateResult,
 
+    candidate: ModelEntryCandidate | None = None,
+
     signal_virtual_quote_reserves: int,
     signal_virtual_token_reserves: int,
 
@@ -267,7 +333,8 @@ async def execute_live_buy_entry_once(
 
     Durable authority boundary:
 
-        no reservation
+        no admission
+            -> permanent ADMITTED entry_signature
             -> ACTIVE reservation
             -> exact live authorization
             -> exact account/message/network validation
@@ -560,8 +627,169 @@ async def execute_live_buy_entry_once(
         )
 
     #
+    # Exact model provenance becomes consequential here.
+    #
+    # This check is intentionally after all deterministic local
+    # entry validation above. It is still before any capital
+    # reservation or other fresh BUY authority.
+    #
+    if (
+        not isinstance(
+            candidate,
+            ModelEntryCandidate,
+        )
+        or candidate.candidate_version
+        != MODEL_ENTRY_CANDIDATE_VERSION
+    ):
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_MODEL_ENTRY_CANDIDATE_INVALID",
+        )
+
+    if candidate.mint != normalized_mint:
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_CANDIDATE_MINT_MISMATCH",
+        )
+
+    if (
+        candidate.signal_virtual_quote_reserves
+        != signal_quote_reserves
+        or candidate.signal_virtual_token_reserves
+        != signal_token_reserves
+    ):
+        return finish(
+            UNKNOWN,
+            VALIDATE,
+            "LIVE_BUY_CANDIDATE_RESERVES_MISMATCH",
+        )
+
+    #
     # --------------------------------------------------------
-    # 1. Durable capital reservation.
+    # 1. Permanent live-entry admission.
+    #
+    # Runtime recovery, operational kill, and signer identity
+    # have already succeeded before this executor is entered.
+    # Local entry inputs have now also validated.
+    #
+    # Admission and reservation intentionally use the same
+    # authoritative normalized database path.
+    # --------------------------------------------------------
+    #
+    try:
+        admission_result = (
+            acquire_live_entry_admission(
+                candidate=candidate,
+                db_path=normalized_path,
+            )
+        )
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            ADMISSION,
+            "LIVE_BUY_ENTRY_ADMISSION_EXCEPTION",
+        )
+
+    if (
+        not isinstance(
+            admission_result,
+            LiveEntryAdmissionResult,
+        )
+        or admission_result.resolver_version
+        != LIVE_ENTRY_ADMISSION_VERSION
+    ):
+        return finish(
+            UNKNOWN,
+            ADMISSION,
+            "LIVE_BUY_ENTRY_ADMISSION_CONTRACT_INVALID",
+        )
+
+    if admission_result.status == ADMISSION_BLOCK:
+        if (
+            admission_result.changed is not False
+            or not admission_result.reasons
+            or admission_result.entry_signature
+            != candidate.entry_signature
+            or not _valid_sha256(
+                admission_result.candidate_sha256
+            )
+            or not _admission_matches_candidate(
+                admission=(
+                    admission_result.admission
+                ),
+                candidate=candidate,
+                candidate_sha256=(
+                    admission_result
+                    .candidate_sha256
+                ),
+            )
+        ):
+            return finish(
+                UNKNOWN,
+                ADMISSION,
+                "LIVE_BUY_ENTRY_ADMISSION_BLOCK_INVALID",
+            )
+
+        return finish(
+            BLOCK,
+            ADMISSION,
+            "LIVE_BUY_ENTRY_ADMISSION_BLOCK",
+            *admission_result.reasons,
+        )
+
+    if admission_result.status == ADMISSION_UNKNOWN:
+        if (
+            admission_result.changed is not False
+            or not admission_result.reasons
+        ):
+            return finish(
+                UNKNOWN,
+                ADMISSION,
+                "LIVE_BUY_ENTRY_ADMISSION_UNKNOWN_INVALID",
+            )
+
+        return finish(
+            UNKNOWN,
+            ADMISSION,
+            "LIVE_BUY_ENTRY_ADMISSION_UNKNOWN",
+            *admission_result.reasons,
+        )
+
+    if admission_result.status != ADMISSION_PASS:
+        return finish(
+            UNKNOWN,
+            ADMISSION,
+            "LIVE_BUY_ENTRY_ADMISSION_STATUS_INVALID",
+        )
+
+    if (
+        admission_result.changed is not True
+        or admission_result.reasons
+        or admission_result.entry_signature
+        != candidate.entry_signature
+        or not _valid_sha256(
+            admission_result.candidate_sha256
+        )
+        or not _admission_matches_candidate(
+            admission=admission_result.admission,
+            candidate=candidate,
+            candidate_sha256=(
+                admission_result.candidate_sha256
+            ),
+        )
+    ):
+        return finish(
+            UNKNOWN,
+            ADMISSION,
+            "LIVE_BUY_ENTRY_ADMISSION_PASS_INVALID",
+        )
+
+    #
+    # --------------------------------------------------------
+    # 2. Durable capital reservation.
     # --------------------------------------------------------
     #
     try:

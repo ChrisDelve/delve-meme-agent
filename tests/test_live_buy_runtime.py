@@ -75,6 +75,7 @@ class LiveBuyRuntimeTests(
 
         self.live_curve = object()
         self.safety = object()
+        self.candidate = object()
 
         self.signal_virtual_quote_reserves = (
             50_000_000_000
@@ -169,6 +170,7 @@ class LiveBuyRuntimeTests(
             protected_cash_lamports=0,
             live_curve=self.live_curve,
             safety=self.safety,
+              candidate=self.candidate,
             signal_virtual_quote_reserves=(
                 self.signal_virtual_quote_reserves
             ),
@@ -374,7 +376,7 @@ class LiveBuyRuntimeTests(
     ):
         self.assertEqual(
             LIVE_BUY_RUNTIME_VERSION,
-            "live-buy-runtime-v3",
+            "live-buy-runtime-v4",
         )
 
     async def test_invalid_kill_switch_fails_before_recovery(
@@ -1104,6 +1106,10 @@ class LiveBuyRuntimeTests(
         self.assertIs(
             kwargs["safety"],
             self.safety,
+        )
+        self.assertIs(
+            kwargs["candidate"],
+            self.candidate,
         )
         self.assertEqual(
             kwargs[

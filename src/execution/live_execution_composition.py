@@ -13,6 +13,9 @@ from src.execution.live_buy_runtime import (
 from src.execution.live_curve_state import (
     LivePumpCurveState,
 )
+from src.execution.model_entry_candidate import (
+    ModelEntryCandidate,
+)
 from src.execution.live_operating_config import (
     LIVE_OPERATING_CONFIG_VERSION,
     LiveOperatingConfig,
@@ -33,7 +36,7 @@ from src.strategies.live_exit_policy import (
 
 
 LIVE_EXECUTION_COMPOSITION_VERSION = (
-    "live-execution-composition-v2"
+    "live-execution-composition-v3"
 )
 
 
@@ -72,6 +75,8 @@ async def run_production_live_buy_once(
     protected_cash_lamports: int,
     live_curve: LivePumpCurveState,
     safety: TokenSafetyGateResult,
+
+    candidate: ModelEntryCandidate | None = None,
     protocol_fee_bps: int,
     creator_fee_bps: int,
     buy_slippage_bps: int,
@@ -125,6 +130,7 @@ async def run_production_live_buy_once(
     async with authority_gate:
         return await run_live_buy_once(
             kill_switch=config.operational_kill,
+            candidate=candidate,
             mint=mint,
             wallet_pubkey=wallet_pubkey,
             protected_cash_lamports=(

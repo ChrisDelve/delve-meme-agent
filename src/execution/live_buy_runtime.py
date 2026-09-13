@@ -28,6 +28,9 @@ from src.execution.live_buy_recovery_executor import (
 from src.execution.live_curve_state import (
     LivePumpCurveState,
 )
+from src.execution.model_entry_candidate import (
+    ModelEntryCandidate,
+)
 from src.execution.pump_buy_v2_signing import (
     MessageSigner,
 )
@@ -43,7 +46,7 @@ from src.safety.token_safety_gate import (
 
 
 LIVE_BUY_RUNTIME_VERSION = (
-    "live-buy-runtime-v3"
+    "live-buy-runtime-v4"
 )
 
 IDLE = "IDLE"
@@ -164,6 +167,8 @@ async def run_live_buy_once(
     live_curve: LivePumpCurveState,
     safety: TokenSafetyGateResult,
 
+    candidate: ModelEntryCandidate | None = None,
+
     signal_virtual_quote_reserves: int | None = None,
     signal_virtual_token_reserves: int | None = None,
 
@@ -198,7 +203,7 @@ async def run_live_buy_once(
       1. recover one existing execution-bearing BUY;
       2. if operational kill is active, stop;
       3. prove fresh-entry signer availability and identity;
-      4. create/prepare/sign at most one fresh BUY entry.
+      4. admit/create/prepare/sign at most one fresh BUY entry.
 
     Recovery always has priority over fresh entry work.
 
@@ -472,6 +477,7 @@ async def run_live_buy_once(
                 ),
                 live_curve=live_curve,
                 safety=safety,
+                candidate=candidate,
                 signal_virtual_quote_reserves=(
                     signal_virtual_quote_reserves
                 ),

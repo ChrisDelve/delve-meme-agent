@@ -21,6 +21,7 @@ from src.execution.live_blockhash_context import (
 )
 from src.execution.live_buy_entry_executor import (
     ACCOUNT_CONTEXT,
+    ADMISSION,
     AUTHORIZE,
     BLOCK,
     BLOCKHASH,
@@ -36,6 +37,11 @@ from src.execution.live_buy_entry_executor import (
     UNKNOWN,
     VALIDATE,
     execute_live_buy_entry_once,
+)
+from src.execution.model_entry_candidate import (
+    EXPECTED_ARTIFACT_VERSION,
+    EXPECTED_MODEL_SHADOW_VERSION,
+    make_model_entry_candidate,
 )
 from src.execution.live_pump_global_state import (
     LIVE_PUMP_GLOBAL_STATE_VERSION,
@@ -70,6 +76,15 @@ from src.execution.pump_buy_v2_signing import (
 from src.execution.pump_buy_v2_unsigned_message import (
     PUMP_BUY_V2_UNSIGNED_MESSAGE_VERSION,
 )
+from src.portfolio.live_entry_admissions import (
+    BLOCK as ADMISSION_BLOCK,
+    PASS as ADMISSION_PASS,
+    UNKNOWN as ADMISSION_UNKNOWN,
+    LIVE_ENTRY_ADMISSION_VERSION,
+    LiveEntryAdmission,
+    LiveEntryAdmissionResult,
+    _candidate_sha256,
+)
 from src.portfolio.live_pump_buy_reservation import (
     BLOCK as RESERVATION_BLOCK,
     PASS as RESERVATION_PASS,
@@ -97,6 +112,7 @@ MODULE = (
 
 _DEFAULT_POLICY = object()
 _DEFAULT_SIMULATION = object()
+_DEFAULT_CANDIDATE = object()
 
 
 class LiveBuyEntryExecutorTests(
@@ -550,10 +566,125 @@ class LiveBuyEntryExecutorTests(
             **data
         )
 
+    def model_candidate(
+        self,
+        *,
+        mint=None,
+        quote_reserves=50_000_000_000,
+        token_reserves=100_000_000_000,
+    ):
+        if mint is None:
+            mint = self.mint
+
+        return make_model_entry_candidate(
+            entry_signature="entry-signature-test",
+            mint=mint,
+            event_user="event-user-test",
+            quote_mint="quote-mint-test",
+            slot=90,
+            trade_timestamp=1_700_000_000,
+            observed_at=1_700_000_001,
+            predicted_at=1_700_000_002,
+            model_shadow_version=(
+                EXPECTED_MODEL_SHADOW_VERSION
+            ),
+            artifact_version=(
+                EXPECTED_ARTIFACT_VERSION
+            ),
+            artifact_sha256="ab" * 32,
+            model_eligible=True,
+            probability_2x_15m=0.42,
+            signal_virtual_quote_reserves=(
+                quote_reserves
+            ),
+            signal_virtual_token_reserves=(
+                token_reserves
+            ),
+        )
+
+    def admission_result(
+        self,
+        *,
+        candidate=None,
+        status=ADMISSION_PASS,
+        reasons=(),
+        changed=True,
+        version=LIVE_ENTRY_ADMISSION_VERSION,
+    ):
+        if candidate is None:
+            candidate = self.model_candidate()
+
+        digest = _candidate_sha256(
+            candidate
+        )
+
+        admission = LiveEntryAdmission(
+            admission_version=(
+                LIVE_ENTRY_ADMISSION_VERSION
+            ),
+            candidate_version=(
+                candidate.candidate_version
+            ),
+            candidate_sha256=digest,
+            entry_signature=(
+                candidate.entry_signature
+            ),
+            mint=candidate.mint,
+            event_user=candidate.event_user,
+            quote_mint=candidate.quote_mint,
+            slot=candidate.slot,
+            trade_timestamp=(
+                candidate.trade_timestamp
+            ),
+            observed_at=(
+                candidate.observed_at
+            ),
+            predicted_at=(
+                candidate.predicted_at
+            ),
+            model_shadow_version=(
+                candidate.model_shadow_version
+            ),
+            artifact_version=(
+                candidate.artifact_version
+            ),
+            artifact_sha256=(
+                candidate.artifact_sha256
+            ),
+            model_eligible=(
+                candidate.model_eligible
+            ),
+            probability_2x_15m=(
+                candidate.probability_2x_15m
+            ),
+            signal_virtual_quote_reserves=(
+                candidate
+                .signal_virtual_quote_reserves
+            ),
+            signal_virtual_token_reserves=(
+                candidate
+                .signal_virtual_token_reserves
+            ),
+            admitted_at=123.0,
+        )
+
+        return LiveEntryAdmissionResult(
+            resolver_version=version,
+            status=status,
+            reasons=tuple(reasons),
+            entry_signature=(
+                candidate.entry_signature
+            ),
+            candidate_sha256=digest,
+            admission=admission,
+            changed=changed,
+        )
+
     @contextmanager
     def orchestration(
         self,
         *,
+        admission=None,
         reservation=None,
         execution=None,
         authorization=None,
@@ -565,6 +696,9 @@ class LiveBuyEntryExecutorTests(
         preflight=None,
         signing=None,
     ):
+        if admission is None:
+            admission = self.admission_result()
+
         if reservation is None:
             reservation = (
                 self.reservation_result()
@@ -604,6 +738,9 @@ class LiveBuyEntryExecutorTests(
             signing = self.signing()
 
         mocks = {
+            "admission": Mock(
+                return_value=admission
+            ),
             "reserve": AsyncMock(
                 return_value=reservation
             ),
@@ -637,6 +774,10 @@ class LiveBuyEntryExecutorTests(
         }
 
         with (
+            patch(
+                f"{MODULE}.acquire_live_entry_admission",
+                new=mocks["admission"],
+            ),
             patch(
                 f"{MODULE}.reserve_live_pump_buy",
                 new=mocks["reserve"],
@@ -684,6 +825,7 @@ class LiveBuyEntryExecutorTests(
         self,
         *,
         signer=None,
+        candidate=_DEFAULT_CANDIDATE,
         compute_unit_limit=None,
         max_authorization_age_seconds=30.0,
         policy=_DEFAULT_POLICY,
@@ -698,6 +840,9 @@ class LiveBuyEntryExecutorTests(
     ):
         if signer is None:
             signer = self.signer
+
+        if candidate is _DEFAULT_CANDIDATE:
+            candidate = self.model_candidate()
 
         if compute_unit_limit is None:
             compute_unit_limit = (
@@ -723,6 +868,7 @@ class LiveBuyEntryExecutorTests(
             protected_cash_lamports=0,
             live_curve=live_curve,
             safety=safety,
+              candidate=candidate,
             signal_virtual_quote_reserves=(
                 signal_virtual_quote_reserves
             ),
@@ -756,7 +902,7 @@ class LiveBuyEntryExecutorTests(
     ):
         self.assertEqual(
             LIVE_BUY_ENTRY_EXECUTOR_VERSION,
-            "live-buy-entry-executor-v2",
+            "live-buy-entry-executor-v3",
         )
 
     async def test_signer_required_before_reservation(
@@ -975,6 +1121,373 @@ class LiveBuyEntryExecutorTests(
         )
 
         reserve.assert_not_awaited()
+
+    async def test_invalid_candidate_fails_before_admission_and_reservation(
+        self,
+    ):
+        with self.orchestration() as mocks:
+            result = await self.invoke(
+                candidate=object()
+            )
+
+        self.assertEqual(result.status, UNKNOWN)
+        self.assertEqual(result.stage, VALIDATE)
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_MODEL_ENTRY_CANDIDATE_INVALID",
+            ),
+        )
+
+        mocks["admission"].assert_not_called()
+        mocks["reserve"].assert_not_awaited()
+
+    async def test_candidate_mint_mismatch_fails_before_admission(
+        self,
+    ):
+        candidate = self.model_candidate(
+            mint="different-mint"
+        )
+
+        with self.orchestration() as mocks:
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(result.status, UNKNOWN)
+        self.assertEqual(result.stage, VALIDATE)
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_CANDIDATE_MINT_MISMATCH",
+            ),
+        )
+
+        mocks["admission"].assert_not_called()
+        mocks["reserve"].assert_not_awaited()
+
+    async def test_candidate_reserves_mismatch_fails_before_admission(
+        self,
+    ):
+        candidate = self.model_candidate(
+            quote_reserves=50_000_000_001
+        )
+
+        with self.orchestration() as mocks:
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(result.status, UNKNOWN)
+        self.assertEqual(result.stage, VALIDATE)
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_CANDIDATE_RESERVES_MISMATCH",
+            ),
+        )
+
+        mocks["admission"].assert_not_called()
+        mocks["reserve"].assert_not_awaited()
+
+    async def test_admission_block_stops_before_reservation(
+        self,
+    ):
+        candidate = self.model_candidate()
+
+        admission = self.admission_result(
+            candidate=candidate,
+            status=ADMISSION_BLOCK,
+            reasons=(
+                "LIVE_ENTRY_ALREADY_ADMITTED",
+            ),
+            changed=False,
+        )
+
+        with self.orchestration(
+            admission=admission
+        ) as mocks:
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(result.status, BLOCK)
+        self.assertEqual(result.stage, ADMISSION)
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_ENTRY_ADMISSION_BLOCK",
+                "LIVE_ENTRY_ALREADY_ADMITTED",
+            ),
+        )
+
+        mocks[
+            "admission"
+        ].assert_called_once_with(
+            candidate=candidate,
+            db_path=self.db_path,
+        )
+        mocks["reserve"].assert_not_awaited()
+
+    async def test_admission_unknown_stops_before_reservation(
+        self,
+    ):
+        candidate = self.model_candidate()
+
+        admission = self.admission_result(
+            candidate=candidate,
+            status=ADMISSION_UNKNOWN,
+            reasons=(
+                "LIVE_ENTRY_ADMISSION_DATABASE_ERROR",
+            ),
+            changed=False,
+        )
+
+        with self.orchestration(
+            admission=admission
+        ) as mocks:
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(result.status, UNKNOWN)
+        self.assertEqual(result.stage, ADMISSION)
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_ENTRY_ADMISSION_UNKNOWN",
+                "LIVE_ENTRY_ADMISSION_DATABASE_ERROR",
+            ),
+        )
+
+        mocks["reserve"].assert_not_awaited()
+
+    async def test_new_exact_admission_precedes_reservation(
+        self,
+    ):
+        candidate = self.model_candidate()
+
+        with self.orchestration() as mocks:
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(result.status, SIGNED)
+
+        mocks[
+            "admission"
+        ].assert_called_once_with(
+            candidate=candidate,
+            db_path=self.db_path,
+        )
+        mocks["reserve"].assert_awaited_once()
+
+    async def test_pass_admission_must_be_new_and_exact(
+        self,
+    ):
+        candidate = self.model_candidate()
+
+        admission = self.admission_result(
+            candidate=candidate,
+            changed=False,
+        )
+
+        with self.orchestration(
+            admission=admission
+        ) as mocks:
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(result.status, UNKNOWN)
+        self.assertEqual(result.stage, ADMISSION)
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_ENTRY_ADMISSION_PASS_INVALID",
+            ),
+        )
+
+        mocks["reserve"].assert_not_awaited()
+
+    async def test_admission_exception_fails_closed_before_reservation(
+        self,
+    ):
+        candidate = self.model_candidate()
+
+        with self.orchestration() as mocks:
+            mocks[
+                "admission"
+            ].side_effect = RuntimeError(
+                "database exploded"
+            )
+
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            ADMISSION,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_ENTRY_ADMISSION_EXCEPTION",
+            ),
+        )
+
+        mocks["reserve"].assert_not_awaited()
+
+    async def test_admission_version_mismatch_fails_closed_before_reservation(
+        self,
+    ):
+        candidate = self.model_candidate()
+
+        admission = self.admission_result(
+            candidate=candidate,
+            version="wrong-admission-version",
+        )
+
+        with self.orchestration(
+            admission=admission
+        ) as mocks:
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            ADMISSION,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_ENTRY_ADMISSION_CONTRACT_INVALID",
+            ),
+        )
+
+        mocks["reserve"].assert_not_awaited()
+
+    async def test_admission_unknown_with_changed_true_is_invalid(
+        self,
+    ):
+        candidate = self.model_candidate()
+
+        admission = self.admission_result(
+            candidate=candidate,
+            status=ADMISSION_UNKNOWN,
+            reasons=(
+                "LIVE_ENTRY_ADMISSION_DATABASE_ERROR",
+            ),
+            changed=True,
+        )
+
+        with self.orchestration(
+            admission=admission
+        ) as mocks:
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            ADMISSION,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_ENTRY_ADMISSION_UNKNOWN_INVALID",
+            ),
+        )
+
+        mocks["reserve"].assert_not_awaited()
+
+    async def test_unrecognized_admission_status_fails_closed(
+        self,
+    ):
+        candidate = self.model_candidate()
+
+        admission = self.admission_result(
+            candidate=candidate,
+            status="SURPRISE",
+            changed=False,
+        )
+
+        with self.orchestration(
+            admission=admission
+        ) as mocks:
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            ADMISSION,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_ENTRY_ADMISSION_STATUS_INVALID",
+            ),
+        )
+
+        mocks["reserve"].assert_not_awaited()
+
+    async def test_admission_identity_mismatch_fails_closed_before_reservation(
+        self,
+    ):
+        candidate = self.model_candidate()
+
+        conflicting_candidate = (
+            self.model_candidate(
+                mint="conflicting-admission-mint"
+            )
+        )
+
+        admission = self.admission_result(
+            candidate=conflicting_candidate,
+        )
+
+        with self.orchestration(
+            admission=admission
+        ) as mocks:
+            result = await self.invoke(
+                candidate=candidate
+            )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            ADMISSION,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_BUY_ENTRY_ADMISSION_PASS_INVALID",
+            ),
+        )
+
+        mocks["reserve"].assert_not_awaited()
 
     async def test_execution_quality_uses_exact_reserved_spend(
         self,

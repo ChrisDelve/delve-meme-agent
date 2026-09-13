@@ -17,7 +17,7 @@ from src.execution.live_process_owner import (
 
 
 LIVE_ENTRY_BUY_ADAPTER_VERSION = (
-    "live-entry-buy-adapter-v1"
+    "live-entry-buy-adapter-v2"
 )
 
 
@@ -139,6 +139,7 @@ async def run_live_entry_buy_once(
         )
 
     return await owner.run_buy_once(
+        candidate=evidence.candidate,
         mint=(
             evidence.candidate.mint
         ),

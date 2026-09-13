@@ -201,7 +201,7 @@ class LiveEntryBuyAdapterTests(
     ):
         self.assertEqual(
             LIVE_ENTRY_BUY_ADAPTER_VERSION,
-            "live-entry-buy-adapter-v1",
+            "live-entry-buy-adapter-v2",
         )
 
     def test_public_signature_has_only_owner_evidence_and_execution_config(
@@ -264,6 +264,7 @@ class LiveEntryBuyAdapterTests(
         )
 
         run_buy.assert_awaited_once_with(
+            candidate=evidence.candidate,
             mint=MINT,
             wallet_pubkey=WALLET,
             protected_cash_lamports=(

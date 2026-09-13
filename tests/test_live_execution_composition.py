@@ -9,6 +9,9 @@ from unittest.mock import (
     patch,
 )
 
+from src.execution.live_authority_gate import (
+    LiveAuthorityGate,
+)
 from src.execution.live_execution_composition import (
     LIVE_EXECUTION_COMPOSITION_VERSION,
     run_production_live_buy_once,
@@ -43,6 +46,10 @@ class LiveExecutionCompositionTests(
 
         self.live_curve = object()
         self.safety = object()
+
+        self.authority_gate = (
+            LiveAuthorityGate()
+        )
 
     def config(
         self,
@@ -127,7 +134,7 @@ class LiveExecutionCompositionTests(
     ):
         self.assertEqual(
             LIVE_EXECUTION_COMPOSITION_VERSION,
-            "live-execution-composition-v1",
+            "live-execution-composition-v2",
         )
 
     async def test_invalid_buy_config_stops_before_signer_and_runtime(
@@ -151,6 +158,7 @@ class LiveExecutionCompositionTests(
                 TypeError
             ):
                 await run_production_live_buy_once(
+                    authority_gate=self.authority_gate,
                     config=object(),
                     **self.buy_inputs(),
                 )
@@ -185,6 +193,7 @@ class LiveExecutionCompositionTests(
                 TypeError
             ):
                 await run_production_live_sell_once(
+                    authority_gate=self.authority_gate,
                     config=object(),
                     **self.sell_inputs(
                         policy=exit_policy,
@@ -239,6 +248,7 @@ class LiveExecutionCompositionTests(
 
             result = (
                 await run_production_live_buy_once(
+                    authority_gate=self.authority_gate,
                     config=config,
                     **inputs,
                 )
@@ -371,6 +381,7 @@ class LiveExecutionCompositionTests(
 
             result = (
                 await run_production_live_sell_once(
+                    authority_gate=self.authority_gate,
                     config=config,
                     **inputs,
                 )
@@ -449,6 +460,7 @@ class LiveExecutionCompositionTests(
                 "runtime failure",
             ):
                 await run_production_live_buy_once(
+                    authority_gate=self.authority_gate,
                     config=config,
                     **self.buy_inputs(),
                 )

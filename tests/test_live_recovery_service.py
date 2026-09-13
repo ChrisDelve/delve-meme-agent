@@ -6,6 +6,9 @@ from unittest.mock import (
     patch,
 )
 
+from src.execution.live_authority_gate import (
+    LiveAuthorityGate,
+)
 from src.execution.live_operating_config import (
     LiveOperatingConfig,
 )
@@ -23,6 +26,13 @@ MODULE = (
 class LiveRecoveryServiceTests(
     unittest.IsolatedAsyncioTestCase
 ):
+    def setUp(
+        self,
+    ):
+        self.authority_gate = (
+            LiveAuthorityGate()
+        )
+
     def config(
         self,
         *,
@@ -50,7 +60,7 @@ class LiveRecoveryServiceTests(
     ):
         self.assertEqual(
             LIVE_RECOVERY_SERVICE_VERSION,
-            "live-recovery-service-v1",
+            "live-recovery-service-v2",
         )
 
     async def test_invalid_config_fails_before_heartbeat(
@@ -66,6 +76,7 @@ class LiveRecoveryServiceTests(
                 TypeError
             ):
                 await run_live_recovery_service(
+                    authority_gate=self.authority_gate,
                     config=None
                 )
 
@@ -90,10 +101,12 @@ class LiveRecoveryServiceTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_service(
+                    authority_gate=self.authority_gate,
                     config=config
                 )
 
         heartbeat.assert_awaited_once_with(
+            authority_gate=self.authority_gate,
             allow_submission=True,
             db_path=config.db_path,
             interval_seconds=(
@@ -120,10 +133,12 @@ class LiveRecoveryServiceTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_service(
+                    authority_gate=self.authority_gate,
                     config=config
                 )
 
         heartbeat.assert_awaited_once_with(
+            authority_gate=self.authority_gate,
             allow_submission=False,
             db_path=config.db_path,
             interval_seconds=(
@@ -153,6 +168,7 @@ class LiveRecoveryServiceTests(
                 "heartbeat failed",
             ):
                 await run_live_recovery_service(
+                    authority_gate=self.authority_gate,
                     config=config
                 )
 
@@ -177,6 +193,7 @@ class LiveRecoveryServiceTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_service(
+                    authority_gate=self.authority_gate,
                     config=config
                 )
 

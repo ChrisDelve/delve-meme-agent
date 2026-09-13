@@ -6,6 +6,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from src.execution.live_authority_gate import (
+    LIVE_AUTHORITY_GATE_VERSION,
+    LiveAuthorityGate,
+)
 from src.execution.live_recovery_coordinator import (
     ADVANCED,
     BLOCK,
@@ -22,10 +26,23 @@ from src.portfolio.live_reservations import (
 
 
 LIVE_RECOVERY_HEARTBEAT_VERSION = (
-    "live-recovery-heartbeat-v1"
+    "live-recovery-heartbeat-v2"
 )
 
 LIVE_RECOVERY_HEARTBEAT_INTERVAL_SECONDS = 5.0
+
+
+def _valid_authority_gate(
+    value: Any,
+) -> bool:
+    return (
+        isinstance(
+            value,
+            LiveAuthorityGate,
+        )
+        and LIVE_AUTHORITY_GATE_VERSION
+        == "live-authority-gate-v1"
+    )
 
 
 def _positive_finite_interval(
@@ -186,6 +203,7 @@ def _print_result(
 async def run_live_recovery_heartbeat(
     *,
     allow_submission: bool,
+    authority_gate: LiveAuthorityGate,
     db_path: Path = DB_PATH,
     interval_seconds: float = (
         LIVE_RECOVERY_HEARTBEAT_INTERVAL_SECONDS
@@ -224,6 +242,13 @@ async def run_live_recovery_heartbeat(
             "allow_submission must be bool"
         )
 
+    if not _valid_authority_gate(
+        authority_gate
+    ):
+        raise TypeError(
+            "authority_gate must be LiveAuthorityGate"
+        )
+
     interval = _positive_finite_interval(
         interval_seconds
     )
@@ -246,14 +271,15 @@ async def run_live_recovery_heartbeat(
         started_at = time.monotonic()
 
         try:
-            result = (
-                await recover_one_live_obligation_once(
-                    allow_submission=(
-                        allow_submission
-                    ),
-                    db_path=normalized_path,
+            async with authority_gate:
+                result = (
+                    await recover_one_live_obligation_once(
+                        allow_submission=(
+                            allow_submission
+                        ),
+                        db_path=normalized_path,
+                    )
                 )
-            )
 
             if not _valid_coordinator_result(
                 result

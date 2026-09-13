@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.execution.live_authority_gate import (
+    LIVE_AUTHORITY_GATE_VERSION,
+    LiveAuthorityGate,
+)
 from src.execution.live_buy_runtime import (
     LiveBuyRuntimeResult,
     run_live_buy_once,
@@ -29,8 +33,21 @@ from src.strategies.live_exit_policy import (
 
 
 LIVE_EXECUTION_COMPOSITION_VERSION = (
-    "live-execution-composition-v1"
+    "live-execution-composition-v2"
 )
+
+
+def _valid_authority_gate(
+    value: Any,
+) -> bool:
+    return (
+        isinstance(
+            value,
+            LiveAuthorityGate,
+        )
+        and LIVE_AUTHORITY_GATE_VERSION
+        == "live-authority-gate-v1"
+    )
 
 
 def _valid_config(
@@ -49,6 +66,7 @@ def _valid_config(
 async def run_production_live_buy_once(
     *,
     config: LiveOperatingConfig,
+    authority_gate: LiveAuthorityGate,
     mint: str,
     wallet_pubkey: str,
     protected_cash_lamports: int,
@@ -93,59 +111,68 @@ async def run_production_live_buy_once(
             "config must be LiveOperatingConfig"
         )
 
+    if not _valid_authority_gate(
+        authority_gate
+    ):
+        raise TypeError(
+            "authority_gate must be LiveAuthorityGate"
+        )
+
     signer = (
         LazyEnvironmentMessageSigner()
     )
 
-    return await run_live_buy_once(
-        kill_switch=config.operational_kill,
-        mint=mint,
-        wallet_pubkey=wallet_pubkey,
-        protected_cash_lamports=(
-            protected_cash_lamports
-        ),
-        live_curve=live_curve,
-        safety=safety,
-        signal_virtual_quote_reserves=(
-            signal_virtual_quote_reserves
-        ),
-        signal_virtual_token_reserves=(
-            signal_virtual_token_reserves
-        ),
-        protocol_fee_bps=protocol_fee_bps,
-        creator_fee_bps=creator_fee_bps,
-        buy_slippage_bps=buy_slippage_bps,
-        buy_base_network_fee_lamports=(
-            buy_base_network_fee_lamports
-        ),
-        buy_priority_fee_lamports=(
-            buy_priority_fee_lamports
-        ),
-        buy_rent_lamports=buy_rent_lamports,
-        exit_slippage_bps=exit_slippage_bps,
-        exit_base_network_fee_lamports=(
-            exit_base_network_fee_lamports
-        ),
-        exit_priority_fee_lamports=(
-            exit_priority_fee_lamports
-        ),
-        reservation_ttl_seconds=(
-            reservation_ttl_seconds
-        ),
-        max_authorization_age_seconds=(
-            max_authorization_age_seconds
-        ),
-        compute_unit_limit=compute_unit_limit,
-        signer=signer,
-        policy=config.risk_policy,
-        min_context_slot=min_context_slot,
-        db_path=config.db_path,
-    )
+    async with authority_gate:
+        return await run_live_buy_once(
+            kill_switch=config.operational_kill,
+            mint=mint,
+            wallet_pubkey=wallet_pubkey,
+            protected_cash_lamports=(
+                protected_cash_lamports
+            ),
+            live_curve=live_curve,
+            safety=safety,
+            signal_virtual_quote_reserves=(
+                signal_virtual_quote_reserves
+            ),
+            signal_virtual_token_reserves=(
+                signal_virtual_token_reserves
+            ),
+            protocol_fee_bps=protocol_fee_bps,
+            creator_fee_bps=creator_fee_bps,
+            buy_slippage_bps=buy_slippage_bps,
+            buy_base_network_fee_lamports=(
+                buy_base_network_fee_lamports
+            ),
+            buy_priority_fee_lamports=(
+                buy_priority_fee_lamports
+            ),
+            buy_rent_lamports=buy_rent_lamports,
+            exit_slippage_bps=exit_slippage_bps,
+            exit_base_network_fee_lamports=(
+                exit_base_network_fee_lamports
+            ),
+            exit_priority_fee_lamports=(
+                exit_priority_fee_lamports
+            ),
+            reservation_ttl_seconds=(
+                reservation_ttl_seconds
+            ),
+            max_authorization_age_seconds=(
+                max_authorization_age_seconds
+            ),
+            compute_unit_limit=compute_unit_limit,
+            signer=signer,
+            policy=config.risk_policy,
+            min_context_slot=min_context_slot,
+            db_path=config.db_path,
+        )
 
 
 async def run_production_live_sell_once(
     *,
     config: LiveOperatingConfig,
+    authority_gate: LiveAuthorityGate,
     compute_unit_limit: int | None,
     wallet_pubkey: str,
     evaluated_at: int,
@@ -173,24 +200,32 @@ async def run_production_live_sell_once(
             "config must be LiveOperatingConfig"
         )
 
+    if not _valid_authority_gate(
+        authority_gate
+    ):
+        raise TypeError(
+            "authority_gate must be LiveAuthorityGate"
+        )
+
     signer = (
         LazyEnvironmentMessageSigner()
     )
 
-    return await run_live_sell_once(
-        kill_switch=config.operational_kill,
-        signer=signer,
-        compute_unit_limit=compute_unit_limit,
-        wallet_pubkey=wallet_pubkey,
-        evaluated_at=evaluated_at,
-        policy=policy,
-        slippage_bps=slippage_bps,
-        base_network_fee_lamports=(
-            base_network_fee_lamports
-        ),
-        priority_fee_lamports=(
-            priority_fee_lamports
-        ),
-        min_context_slot=min_context_slot,
-        db_path=config.db_path,
-    )
+    async with authority_gate:
+        return await run_live_sell_once(
+            kill_switch=config.operational_kill,
+            signer=signer,
+            compute_unit_limit=compute_unit_limit,
+            wallet_pubkey=wallet_pubkey,
+            evaluated_at=evaluated_at,
+            policy=policy,
+            slippage_bps=slippage_bps,
+            base_network_fee_lamports=(
+                base_network_fee_lamports
+            ),
+            priority_fee_lamports=(
+                priority_fee_lamports
+            ),
+            min_context_slot=min_context_slot,
+            db_path=config.db_path,
+        )

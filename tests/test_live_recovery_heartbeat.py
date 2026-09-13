@@ -14,6 +14,9 @@ from src.execution.live_recovery_coordinator import (
     IDLE,
     LIVE_RECOVERY_COORDINATOR_VERSION,
 )
+from src.execution.live_authority_gate import (
+    LiveAuthorityGate,
+)
 from src.execution.live_recovery_heartbeat import (
     LIVE_RECOVERY_HEARTBEAT_INTERVAL_SECONDS,
     LIVE_RECOVERY_HEARTBEAT_VERSION,
@@ -34,6 +37,10 @@ class LiveRecoveryHeartbeatTests(
     ):
         self.db_path = Path(
             "/tmp/live-recovery-heartbeat-test.sqlite3"
+        )
+
+        self.authority_gate = (
+            LiveAuthorityGate()
         )
 
     def result(
@@ -64,7 +71,7 @@ class LiveRecoveryHeartbeatTests(
     ):
         self.assertEqual(
             LIVE_RECOVERY_HEARTBEAT_VERSION,
-            "live-recovery-heartbeat-v1",
+            "live-recovery-heartbeat-v2",
         )
 
         self.assertEqual(
@@ -85,6 +92,7 @@ class LiveRecoveryHeartbeatTests(
                 TypeError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     db_path=self.db_path,
                 )
 
@@ -103,6 +111,7 @@ class LiveRecoveryHeartbeatTests(
                 TypeError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     allow_submission="yes",
                     db_path=self.db_path,
                 )
@@ -132,6 +141,7 @@ class LiveRecoveryHeartbeatTests(
                         ValueError
                     ):
                         await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                             allow_submission=True,
                             db_path=self.db_path,
                             interval_seconds=invalid,
@@ -164,6 +174,7 @@ class LiveRecoveryHeartbeatTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     allow_submission=True,
                     db_path=self.db_path,
                     interval_seconds=5.0,
@@ -204,6 +215,7 @@ class LiveRecoveryHeartbeatTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     allow_submission=False,
                     db_path=self.db_path,
                     interval_seconds=5.0,
@@ -237,6 +249,7 @@ class LiveRecoveryHeartbeatTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     allow_submission=True,
                     db_path=self.db_path,
                 )
@@ -280,6 +293,7 @@ class LiveRecoveryHeartbeatTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     allow_submission=True,
                     db_path=self.db_path,
                     interval_seconds=5.0,
@@ -325,6 +339,7 @@ class LiveRecoveryHeartbeatTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     allow_submission=True,
                     db_path=self.db_path,
                 )
@@ -365,6 +380,7 @@ class LiveRecoveryHeartbeatTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     allow_submission=True,
                     db_path=self.db_path,
                 )
@@ -407,6 +423,7 @@ class LiveRecoveryHeartbeatTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     allow_submission=True,
                     db_path=self.db_path,
                 )
@@ -448,6 +465,7 @@ class LiveRecoveryHeartbeatTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     allow_submission=True,
                     db_path=self.db_path,
                     interval_seconds=5.0,
@@ -489,6 +507,7 @@ class LiveRecoveryHeartbeatTests(
                 asyncio.CancelledError
             ):
                 await run_live_recovery_heartbeat(
+                    authority_gate=self.authority_gate,
                     allow_submission=True,
                     db_path=self.db_path,
                     interval_seconds=5.0,

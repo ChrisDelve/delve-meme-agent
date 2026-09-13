@@ -3,9 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import (
     AsyncMock,
+    Mock,
     patch,
 )
 import unittest
+
+from solders.pubkey import Pubkey
 
 from src.execution.live_buy_entry_executor import (
     BLOCK as ENTRY_BLOCK,
@@ -58,10 +61,17 @@ class LiveBuyRuntimeTests(
             "/tmp/live-buy-runtime-test.db"
         )
 
-        self.wallet = "wallet"
+        self.wallet = (
+            "11111111111111111111111111111112"
+        )
         self.mint = "mint"
 
-        self.signer = object()
+        self.signer = Mock()
+        self.signer.pubkey.return_value = (
+            Pubkey.from_string(
+                self.wallet
+            )
+        )
 
         self.live_curve = object()
         self.safety = object()
@@ -185,12 +195,186 @@ class LiveBuyRuntimeTests(
             db_path=db_path,
         )
 
+    async def test_non_idle_recovery_never_touches_signer(
+        self,
+    ):
+        recovery = AsyncMock(
+            return_value=self.recovery(
+                status=RECOVERY_HOLD,
+                reasons=("RECOVERY_HOLD",),
+            )
+        )
+
+        entry = AsyncMock()
+
+        signer = Mock()
+        signer.pubkey.side_effect = AssertionError(
+            "signer must not be touched"
+        )
+
+        with (
+            patch(
+                f"{MODULE}.recover_one_live_buy_once",
+                new=recovery,
+            ),
+            patch(
+                f"{MODULE}.execute_live_buy_entry_once",
+                new=entry,
+            ),
+        ):
+            result = await self.invoke(
+                signer=signer
+            )
+
+        self.assertEqual(
+            result.status,
+            HOLD,
+        )
+        self.assertEqual(
+            result.stage,
+            RECOVERY,
+        )
+
+        signer.pubkey.assert_not_called()
+        entry.assert_not_awaited()
+
+    async def test_kill_never_touches_signer(
+        self,
+    ):
+        recovery = AsyncMock(
+            return_value=self.recovery()
+        )
+
+        entry = AsyncMock()
+
+        signer = Mock()
+        signer.pubkey.side_effect = AssertionError(
+            "signer must not be touched"
+        )
+
+        with (
+            patch(
+                f"{MODULE}.recover_one_live_buy_once",
+                new=recovery,
+            ),
+            patch(
+                f"{MODULE}.execute_live_buy_entry_once",
+                new=entry,
+            ),
+        ):
+            result = await self.invoke(
+                kill_switch=True,
+                signer=signer,
+            )
+
+        self.assertEqual(
+            result.status,
+            HALTED,
+        )
+        self.assertEqual(
+            result.stage,
+            KILL,
+        )
+
+        signer.pubkey.assert_not_called()
+        entry.assert_not_awaited()
+
+    async def test_signer_load_failure_stops_before_entry(
+        self,
+    ):
+        recovery = AsyncMock(
+            return_value=self.recovery()
+        )
+
+        entry = AsyncMock()
+
+        signer = Mock()
+        signer.pubkey.side_effect = RuntimeError(
+            "signer unavailable"
+        )
+
+        with (
+            patch(
+                f"{MODULE}.recover_one_live_buy_once",
+                new=recovery,
+            ),
+            patch(
+                f"{MODULE}.execute_live_buy_entry_once",
+                new=entry,
+            ),
+        ):
+            result = await self.invoke(
+                signer=signer
+            )
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            ENTRY,
+        )
+        self.assertIn(
+            "LIVE_BUY_RUNTIME_SIGNER_PUBKEY_FAILED",
+            result.reasons,
+        )
+
+        signer.pubkey.assert_called_once_with()
+        entry.assert_not_awaited()
+
+    async def test_signer_identity_mismatch_stops_before_entry(
+        self,
+    ):
+        recovery = AsyncMock(
+            return_value=self.recovery()
+        )
+
+        entry = AsyncMock()
+
+        signer = Mock()
+        signer.pubkey.return_value = (
+            Pubkey.from_string(
+                "11111111111111111111111111111111"
+            )
+        )
+
+        with (
+            patch(
+                f"{MODULE}.recover_one_live_buy_once",
+                new=recovery,
+            ),
+            patch(
+                f"{MODULE}.execute_live_buy_entry_once",
+                new=entry,
+            ),
+        ):
+            result = await self.invoke(
+                signer=signer
+            )
+
+        self.assertEqual(
+            result.status,
+            BLOCK,
+        )
+        self.assertEqual(
+            result.stage,
+            ENTRY,
+        )
+        self.assertIn(
+            "LIVE_BUY_RUNTIME_SIGNER_PUBKEY_MISMATCH",
+            result.reasons,
+        )
+
+        signer.pubkey.assert_called_once_with()
+        entry.assert_not_awaited()
+
     def test_version_is_locked(
         self,
     ):
         self.assertEqual(
             LIVE_BUY_RUNTIME_VERSION,
-            "live-buy-runtime-v2",
+            "live-buy-runtime-v3",
         )
 
     async def test_invalid_kill_switch_fails_before_recovery(

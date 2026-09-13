@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from solders.pubkey import Pubkey
+
 from src.execution.live_buy_entry_executor import (
     BLOCK as ENTRY_BLOCK,
     SIGNED as ENTRY_SIGNED,
@@ -41,7 +43,7 @@ from src.safety.token_safety_gate import (
 
 
 LIVE_BUY_RUNTIME_VERSION = (
-    "live-buy-runtime-v2"
+    "live-buy-runtime-v3"
 )
 
 IDLE = "IDLE"
@@ -195,7 +197,8 @@ async def run_live_buy_once(
 
       1. recover one existing execution-bearing BUY;
       2. if operational kill is active, stop;
-      3. create/prepare/sign at most one fresh BUY entry.
+      3. prove fresh-entry signer availability and identity;
+      4. create/prepare/sign at most one fresh BUY entry.
 
     Recovery always has priority over fresh entry work.
 
@@ -231,8 +234,12 @@ async def run_live_buy_once(
       - candidate/strategy selection.
 
     Entry-specific validation deliberately remains inside
-    execute_live_buy_entry_once(). Bad fresh-entry inputs
-    must never suppress higher-priority recovery.
+    execute_live_buy_entry_once() except for signer availability
+    and identity. Those are proven here only after recovery and
+    kill, but before the child may reserve capital.
+
+    Bad fresh-entry inputs must never suppress higher-priority
+    recovery.
     """
 
     recovery_result: (
@@ -386,10 +393,71 @@ async def run_live_buy_once(
 
     #
     # --------------------------------------------------------
-    # 3. Completely idle recovery permits one fresh bounded
+    # 3. Prove fresh-entry signer availability and identity.
+    #
+    # This occurs only after higher-priority recovery and kill.
+    # It must occur before execute_live_buy_entry_once(), because
+    # that child may create an ACTIVE capital reservation.
+    #
+    # With LazyEnvironmentMessageSigner this is the first point
+    # at which environment-backed key authority is touched.
+    # --------------------------------------------------------
+    #
+    if signer is None:
+        return finish(
+            UNKNOWN,
+            ENTRY,
+            "LIVE_BUY_RUNTIME_SIGNER_REQUIRED",
+        )
+
+    try:
+        signer_pubkey = signer.pubkey()
+
+    except Exception:
+        return finish(
+            UNKNOWN,
+            ENTRY,
+            "LIVE_BUY_RUNTIME_SIGNER_PUBKEY_FAILED",
+        )
+
+    if not isinstance(
+        signer_pubkey,
+        Pubkey,
+    ):
+        return finish(
+            BLOCK,
+            ENTRY,
+            "LIVE_BUY_RUNTIME_SIGNER_PUBKEY_INVALID",
+        )
+
+    expected_wallet = (
+        wallet_pubkey.strip()
+        if isinstance(
+            wallet_pubkey,
+            str,
+        )
+        else None
+    )
+
+    if (
+        expected_wallet
+        and str(
+            signer_pubkey
+        )
+        != expected_wallet
+    ):
+        return finish(
+            BLOCK,
+            ENTRY,
+            "LIVE_BUY_RUNTIME_SIGNER_PUBKEY_MISMATCH",
+        )
+
+    #
+    # --------------------------------------------------------
+    # 4. Completely idle recovery permits one fresh bounded
     # BUY entry.
     #
-    # All fresh-entry validation belongs to the child.
+    # Remaining fresh-entry validation belongs to the child.
     # --------------------------------------------------------
     #
     try:

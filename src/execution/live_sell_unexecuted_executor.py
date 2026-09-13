@@ -51,7 +51,7 @@ from src.portfolio.live_sell_claims import (
 
 
 LIVE_SELL_UNEXECUTED_EXECUTOR_VERSION = (
-    "live-sell-unexecuted-executor-v1"
+    "live-sell-unexecuted-executor-v2"
 )
 
 IDLE = "IDLE"
@@ -219,7 +219,7 @@ def _candidate_contract_valid(
 
 async def sign_one_unexecuted_live_sell_once(
     *,
-    signer: MessageSigner,
+    signer: MessageSigner | None,
     compute_unit_limit: int,
     db_path: Path = DB_PATH,
 ) -> LiveSellUnexecutedExecutionResult:
@@ -302,30 +302,6 @@ async def sign_one_unexecuted_live_sell_once(
             transaction_signature=(
                 transaction_signature
             ),
-        )
-
-    if (
-        not isinstance(
-            compute_unit_limit,
-            int,
-        )
-        or isinstance(
-            compute_unit_limit,
-            bool,
-        )
-        or compute_unit_limit <= 0
-        or compute_unit_limit
-        > MAX_COMPUTE_UNIT_LIMIT
-    ):
-        return finish(
-            BLOCK,
-            "LIVE_SELL_COMPUTE_UNIT_LIMIT_INVALID",
-        )
-
-    if signer is None:
-        return finish(
-            BLOCK,
-            "LIVE_SELL_SIGNER_REQUIRED",
         )
 
     try:
@@ -417,6 +393,37 @@ async def sign_one_unexecuted_live_sell_once(
         return finish(
             UNKNOWN,
             "LIVE_SELL_UNEXECUTED_CANDIDATE_INVALID",
+        )
+
+    #
+    # Signing-only configuration is irrelevant until discovery
+    # proves that an actual durable SELL candidate needs signing.
+    #
+    # Empty discovery above must remain IDLE even when the process
+    # has no signer or signing compute configuration available.
+    #
+    if (
+        not isinstance(
+            compute_unit_limit,
+            int,
+        )
+        or isinstance(
+            compute_unit_limit,
+            bool,
+        )
+        or compute_unit_limit <= 0
+        or compute_unit_limit
+        > MAX_COMPUTE_UNIT_LIMIT
+    ):
+        return finish(
+            BLOCK,
+            "LIVE_SELL_COMPUTE_UNIT_LIMIT_INVALID",
+        )
+
+    if signer is None:
+        return finish(
+            BLOCK,
+            "LIVE_SELL_SIGNER_REQUIRED",
         )
 
     authorization = (

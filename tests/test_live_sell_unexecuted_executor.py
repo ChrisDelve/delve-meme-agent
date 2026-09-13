@@ -23,6 +23,7 @@ from src.execution.live_sell_unexecuted_executor import (
     IDLE,
     SIGNED,
     UNKNOWN,
+    LIVE_SELL_UNEXECUTED_EXECUTOR_VERSION,
     sign_one_unexecuted_live_sell_once,
 )
 from src.execution.pump_sell_v2_account_context import (
@@ -343,6 +344,155 @@ class LiveSellUnexecutedExecutorTests(
             pre_sign_mock,
             signing_mock,
         )
+
+    def test_version_is_locked(
+        self,
+    ):
+        self.assertEqual(
+            LIVE_SELL_UNEXECUTED_EXECUTOR_VERSION,
+            "live-sell-unexecuted-executor-v2",
+        )
+
+    async def test_empty_discovery_needs_no_signing_configuration(
+        self,
+    ):
+        discovery_mock = MagicMock(
+            return_value=self.discovery(
+                candidates=(),
+            )
+        )
+
+        global_mock = AsyncMock()
+
+        with (
+            patch(
+                f"{MODULE}."
+                "discover_live_sell_unexecuted_candidates",
+                discovery_mock,
+            ),
+            patch(
+                f"{MODULE}."
+                "resolve_live_pump_global_state",
+                global_mock,
+            ),
+        ):
+            result = (
+                await sign_one_unexecuted_live_sell_once(
+                    signer=None,
+                    compute_unit_limit=0,
+                    db_path=self.db_path,
+                )
+            )
+
+        self.assertEqual(
+            result.status,
+            IDLE,
+        )
+        self.assertEqual(
+            result.discovered_candidates,
+            0,
+        )
+
+        discovery_mock.assert_called_once_with(
+            db_path=self.db_path,
+        )
+        global_mock.assert_not_awaited()
+
+    async def test_candidate_requires_signer_after_discovery(
+        self,
+    ):
+        discovery_mock = MagicMock(
+            return_value=self.discovery()
+        )
+
+        global_mock = AsyncMock()
+
+        with (
+            patch(
+                f"{MODULE}."
+                "discover_live_sell_unexecuted_candidates",
+                discovery_mock,
+            ),
+            patch(
+                f"{MODULE}."
+                "resolve_live_pump_global_state",
+                global_mock,
+            ),
+        ):
+            result = (
+                await sign_one_unexecuted_live_sell_once(
+                    signer=None,
+                    compute_unit_limit=(
+                        self.compute_unit_limit
+                    ),
+                    db_path=self.db_path,
+                )
+            )
+
+        self.assertEqual(
+            result.status,
+            BLOCK,
+        )
+        self.assertIn(
+            "LIVE_SELL_SIGNER_REQUIRED",
+            result.reasons,
+        )
+        self.assertEqual(
+            result.discovered_candidates,
+            1,
+        )
+
+        discovery_mock.assert_called_once_with(
+            db_path=self.db_path,
+        )
+        global_mock.assert_not_awaited()
+
+    async def test_candidate_requires_compute_config_after_discovery(
+        self,
+    ):
+        discovery_mock = MagicMock(
+            return_value=self.discovery()
+        )
+
+        global_mock = AsyncMock()
+
+        with (
+            patch(
+                f"{MODULE}."
+                "discover_live_sell_unexecuted_candidates",
+                discovery_mock,
+            ),
+            patch(
+                f"{MODULE}."
+                "resolve_live_pump_global_state",
+                global_mock,
+            ),
+        ):
+            result = (
+                await sign_one_unexecuted_live_sell_once(
+                    signer=self.signer,
+                    compute_unit_limit=0,
+                    db_path=self.db_path,
+                )
+            )
+
+        self.assertEqual(
+            result.status,
+            BLOCK,
+        )
+        self.assertIn(
+            "LIVE_SELL_COMPUTE_UNIT_LIMIT_INVALID",
+            result.reasons,
+        )
+        self.assertEqual(
+            result.discovered_candidates,
+            1,
+        )
+
+        discovery_mock.assert_called_once_with(
+            db_path=self.db_path,
+        )
+        global_mock.assert_not_awaited()
 
     async def test_empty_discovery_is_idle_without_preparation(
         self,

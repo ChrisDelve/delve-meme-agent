@@ -3,6 +3,7 @@ import json
 import os
 import ssl
 import time
+from collections.abc import Mapping
 
 import certifi
 import websockets
@@ -54,6 +55,9 @@ from src.portfolio.shadow_portfolio import (
 
 from src.strategies.model_shadow_signals import (
     record_model_shadow_prediction,
+)
+from src.execution.live_entry_candidate_scheduler import (
+    LiveEntryCandidateScheduler,
 )
 
 load_dotenv()
@@ -359,10 +363,69 @@ async def process_buy(
         )
         print("=" * 70)
 
+def _prediction_is_exactly_eligible(
+    prediction,
+):
+    if not isinstance(
+        prediction,
+        Mapping,
+    ):
+        return False
+
+    value = prediction.get(
+        "model_eligible"
+    )
+
+    return (
+        value is True
+        or (
+            type(value) is int
+            and value == 1
+        )
+    )
+
+
+def _observe_live_entry_candidate_task(
+    task,
+    *,
+    mint,
+):
+    if task.cancelled():
+        return
+
+    try:
+        result = task.result()
+
+    except Exception:
+        #
+        # The scheduler already owns unexpected task-exception
+        # visibility. Do not print the same exception twice here.
+        #
+        return
+
+    reasons = (
+        ",".join(
+            result.reasons
+        )
+        if result.reasons
+        else "-"
+    )
+
+    print(
+        "🔎 LIVE ENTRY CANDIDATE | "
+        f"{mint[:8]}… | "
+        f"status={result.status} | "
+        f"stage={result.stage} | "
+        f"reasons={reasons}"
+    )
+
+
 def process_buy_event(
     signature,
     slot,
     trade_event,
+    *,
+    live_entry_scheduler=None,
 ):
     observed_at = int(time.time())
     result = save_buy(
@@ -519,6 +582,68 @@ def process_buy_event(
                 f"{error}"
             )
 
+    if (
+        live_entry_scheduler is not None
+        and prediction is not None
+        and _prediction_is_exactly_eligible(
+            prediction
+        )
+    ):
+        try:
+            live_schedule = (
+                live_entry_scheduler.schedule(
+                    prediction=prediction,
+                    entry_signature=signature,
+                    mint=trade_event["mint"],
+                    event_user=trade_event["user"],
+                    quote_mint=(
+                        trade_event["quote_mint"]
+                    ),
+                    slot=slot,
+                    trade_timestamp=(
+                        trade_event["timestamp"]
+                    ),
+                    observed_at=observed_at,
+                    signal_virtual_quote_reserves=(
+                        trade_event[
+                            "virtual_sol_reserves"
+                        ]
+                    ),
+                    signal_virtual_token_reserves=(
+                        trade_event[
+                            "virtual_token_reserves"
+                        ]
+                    ),
+                )
+            )
+
+            if live_schedule.scheduled:
+                live_schedule.task.add_done_callback(
+                    lambda task, bound_mint=(
+                        trade_event["mint"]
+                    ): (
+                        _observe_live_entry_candidate_task(
+                            task,
+                            mint=bound_mint,
+                        )
+                    )
+                )
+
+            else:
+                print(
+                    "🔎 LIVE ENTRY CANDIDATE BLOCKED | "
+                    f"{trade_event['mint'][:8]}… | "
+                    f"reasons="
+                    f"{','.join(live_schedule.reasons)}"
+                )
+
+        except Exception as error:
+            print(
+                "⚠️ LIVE ENTRY SCHEDULE ERROR | "
+                f"{type(error).__name__}: "
+                f"{error}"
+            )
+
     shadow_signal = record_shadow_signal(
         signature=signature,
         slot=slot,
@@ -547,7 +672,10 @@ def process_buy_event(
             f"{shadow_signal['alpha_score']:.2f}"
         )
 
-async def listen():
+async def listen(
+    *,
+    live_entry_scheduler=None,
+):
     init_db()
     invalidate_stale_intervals()
 
@@ -709,6 +837,9 @@ async def listen():
                                 signature,
                                 slot,
                                 trade_event,
+                                live_entry_scheduler=(
+                                    live_entry_scheduler
+                                ),
                             )
 
                     #
@@ -753,60 +884,108 @@ async def listen():
 
             await asyncio.sleep(2)
 
-async def run_market_collector() -> None:
-    #
-    # Initialize and validate the shadow ledger
-    # before live market events can arrive.
-    #
-    shadow_account = (
-        initialize_shadow_account()
-    )
+async def run_market_collector(
+    *,
+    live_entry_scheduler: (
+        LiveEntryCandidateScheduler | None
+    ) = None,
+) -> None:
+    """
+    Run the market collector.
 
-    print(
-        "💰 SHADOW ACCOUNT | "
-        f"equity="
-        f"{shadow_account.current_equity_lamports / 1_000_000_000:.9f} SOL | "
-        f"cash="
-        f"{shadow_account.cash_balance_lamports / 1_000_000_000:.9f} SOL | "
-        f"open={shadow_account.open_positions}"
-    )
+    With no explicitly supplied live-entry scheduler, the collector
+    performs no live-entry evidence RPC work.
 
-    #
-    # Restore persisted OPEN shadow positions
-    # before live market events can arrive.
-    #
-    tracked_mints = (
-        initialize_shadow_position_manager()
-    )
+    If a scheduler is supplied, this function owns its lifecycle and
+    closes it during collector shutdown.
+    """
 
-    print(
-        "📒 SHADOW PORTFOLIO | "
-        f"{len(tracked_mints)} open position(s) restored"
-    )
-
-    #
-    # Exactly one periodic sweeper for the
-    # lifetime of this collector process.
-    #
-    sweeper_task = asyncio.create_task(
-        run_shadow_position_sweeper()
-    )
+    if (
+        live_entry_scheduler is not None
+        and not isinstance(
+            live_entry_scheduler,
+            LiveEntryCandidateScheduler,
+        )
+    ):
+        raise TypeError(
+            "live_entry_scheduler must be "
+            "LiveEntryCandidateScheduler"
+        )
+    sweeper_task = None
 
     try:
-        await listen()
-
-    finally:
-        sweeper_task.cancel()
-
-        try:
-            await sweeper_task
-
-        except asyncio.CancelledError:
-            pass
+        #
+        # Initialize and validate the shadow ledger
+        # before live market events can arrive.
+        #
+        shadow_account = (
+            initialize_shadow_account()
+        )
 
         print(
-            "🧹 Shadow position sweeper stopped."
+            "💰 SHADOW ACCOUNT | "
+            f"equity="
+            f"{shadow_account.current_equity_lamports / 1_000_000_000:.9f} SOL | "
+            f"cash="
+            f"{shadow_account.cash_balance_lamports / 1_000_000_000:.9f} SOL | "
+            f"open={shadow_account.open_positions}"
         )
+
+        #
+        # Restore persisted OPEN shadow positions
+        # before live market events can arrive.
+        #
+        tracked_mints = (
+            initialize_shadow_position_manager()
+        )
+
+        print(
+            "📒 SHADOW PORTFOLIO | "
+            f"{len(tracked_mints)} open position(s) restored"
+        )
+
+        #
+        # Exactly one periodic sweeper for the
+        # lifetime of this collector process.
+        #
+        sweeper_task = asyncio.create_task(
+            run_shadow_position_sweeper()
+        )
+
+        await listen(
+            live_entry_scheduler=(
+                live_entry_scheduler
+            )
+        )
+
+    finally:
+        try:
+            #
+            # Ownership begins as soon as a valid scheduler is accepted,
+            # not only after collector startup succeeds.
+            #
+            if live_entry_scheduler is not None:
+                await live_entry_scheduler.close()
+
+                print(
+                    "🧹 Live-entry candidate "
+                    "scheduler stopped."
+                )
+
+        finally:
+            if sweeper_task is not None:
+                sweeper_task.cancel()
+
+                try:
+                    await sweeper_task
+
+                except asyncio.CancelledError:
+                    pass
+
+                print(
+                    "🧹 Shadow position sweeper stopped."
+                )
+
 
 if __name__ == "__main__":
     try:

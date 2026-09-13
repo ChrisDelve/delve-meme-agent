@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Type
@@ -13,7 +14,7 @@ except ImportError:
 
 
 LIVE_PROCESS_AUTHORITY_LEASE_VERSION = (
-    "live-process-authority-lease-v1"
+    "live-process-authority-lease-v2"
 )
 
 LIVE_PROCESS_AUTHORITY_ALREADY_HELD = (
@@ -30,6 +31,10 @@ LIVE_PROCESS_AUTHORITY_OPEN_FAILED = (
 
 LIVE_PROCESS_AUTHORITY_LOCK_FAILED = (
     "LIVE_PROCESS_AUTHORITY_LOCK_FAILED"
+)
+
+LIVE_PROCESS_AUTHORITY_INVALID_LOCK_FILE = (
+    "LIVE_PROCESS_AUTHORITY_INVALID_LOCK_FILE"
 )
 
 
@@ -129,19 +134,70 @@ class LiveProcessAuthorityLease:
                 fcntl,
                 "LOCK_NB",
             )
+            or not hasattr(
+                os,
+                "O_NOFOLLOW",
+            )
         ):
             raise LiveProcessAuthorityLeaseError(
                 LIVE_PROCESS_AUTHORITY_UNSUPPORTED
             )
 
         try:
+            existing = os.lstat(
+                path
+            )
+        except FileNotFoundError:
+            existing = None
+        except OSError:
+            raise LiveProcessAuthorityLeaseError(
+                LIVE_PROCESS_AUTHORITY_OPEN_FAILED
+            ) from None
+
+        if existing is not None:
+            if (
+                stat.S_ISLNK(
+                    existing.st_mode
+                )
+                or not stat.S_ISREG(
+                    existing.st_mode
+                )
+                or existing.st_nlink != 1
+                or existing.st_uid
+                != os.geteuid()
+            ):
+                raise LiveProcessAuthorityLeaseError(
+                    LIVE_PROCESS_AUTHORITY_INVALID_LOCK_FILE
+                )
+
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_NOFOLLOW
+        )
+
+        if hasattr(
+            os,
+            "O_CLOEXEC",
+        ):
+            flags |= os.O_CLOEXEC
+
+        try:
             fd = os.open(
                 path,
-                os.O_RDWR
-                | os.O_CREAT,
+                flags,
                 0o600,
             )
-        except Exception:
+        except OSError as error:
+            if error.errno in (
+                errno.ELOOP,
+                errno.EISDIR,
+                errno.ENOTDIR,
+            ):
+                raise LiveProcessAuthorityLeaseError(
+                    LIVE_PROCESS_AUTHORITY_INVALID_LOCK_FILE
+                ) from None
+
             raise LiveProcessAuthorityLeaseError(
                 LIVE_PROCESS_AUTHORITY_OPEN_FAILED
             ) from None
@@ -151,6 +207,65 @@ class LiveProcessAuthorityLease:
                 fd,
                 False,
             )
+
+            try:
+                opened = os.fstat(
+                    fd
+                )
+            except OSError:
+                raise LiveProcessAuthorityLeaseError(
+                    LIVE_PROCESS_AUTHORITY_INVALID_LOCK_FILE
+                ) from None
+
+            if (
+                not stat.S_ISREG(
+                    opened.st_mode
+                )
+                or opened.st_nlink != 1
+                or opened.st_uid
+                != os.geteuid()
+            ):
+                raise LiveProcessAuthorityLeaseError(
+                    LIVE_PROCESS_AUTHORITY_INVALID_LOCK_FILE
+                )
+
+            try:
+                current = os.lstat(
+                    path
+                )
+            except OSError:
+                raise LiveProcessAuthorityLeaseError(
+                    LIVE_PROCESS_AUTHORITY_INVALID_LOCK_FILE
+                ) from None
+
+            if (
+                stat.S_ISLNK(
+                    current.st_mode
+                )
+                or not stat.S_ISREG(
+                    current.st_mode
+                )
+                or current.st_nlink != 1
+                or current.st_uid
+                != os.geteuid()
+                or current.st_dev
+                != opened.st_dev
+                or current.st_ino
+                != opened.st_ino
+            ):
+                raise LiveProcessAuthorityLeaseError(
+                    LIVE_PROCESS_AUTHORITY_INVALID_LOCK_FILE
+                )
+
+            try:
+                os.fchmod(
+                    fd,
+                    0o600,
+                )
+            except OSError:
+                raise LiveProcessAuthorityLeaseError(
+                    LIVE_PROCESS_AUTHORITY_INVALID_LOCK_FILE
+                ) from None
 
             try:
                 fcntl.flock(

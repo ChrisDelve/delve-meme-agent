@@ -17,7 +17,9 @@ from src.execution.pump_sell_v2_signing import (
 
 from src.execution.solana_message_signer import (
     DEFAULT_SOLANA_KEYPAIR_ENV,
+    LAZY_SOLANA_MESSAGE_SIGNER_VERSION,
     SOLANA_MESSAGE_SIGNER_VERSION,
+    LazyEnvironmentMessageSigner,
     SoldersMessageSigner,
     SolanaSignerConfigurationError,
     load_solana_message_signer_from_env,
@@ -55,6 +57,292 @@ class SolanaMessageSignerTests(
         self.assertEqual(
             SOLANA_MESSAGE_SIGNER_VERSION,
             "solana-message-signer-v1",
+        )
+
+    def test_lazy_public_version_is_locked(
+        self,
+    ):
+        self.assertEqual(
+            LAZY_SOLANA_MESSAGE_SIGNER_VERSION,
+            "lazy-solana-message-signer-v1",
+        )
+
+    def test_lazy_construction_and_repr_do_not_load(
+        self,
+    ):
+        with patch(
+            "src.execution.solana_message_signer."
+            "load_solana_message_signer_from_env"
+        ) as loader:
+            signer = LazyEnvironmentMessageSigner()
+
+            rendered = repr(
+                signer
+            )
+
+        loader.assert_not_called()
+
+        self.assertEqual(
+            rendered,
+            (
+                "LazyEnvironmentMessageSigner("
+                "state='unloaded'"
+                ")"
+            ),
+        )
+
+    def test_lazy_pubkey_then_sign_loads_once(
+        self,
+    ):
+        keypair = Keypair()
+
+        loaded = SoldersMessageSigner(
+            keypair
+        )
+
+        with patch(
+            "src.execution.solana_message_signer."
+            "load_solana_message_signer_from_env",
+            return_value=loaded,
+        ) as loader:
+            signer = LazyEnvironmentMessageSigner()
+
+            public_key = signer.pubkey()
+
+            signature = signer.sign_message(
+                b"lazy-after-pubkey"
+            )
+
+            rendered = repr(
+                signer
+            )
+
+        loader.assert_called_once_with()
+
+        self.assertEqual(
+            public_key,
+            keypair.pubkey(),
+        )
+
+        self.assertEqual(
+            signature,
+            keypair.sign_message(
+                b"lazy-after-pubkey"
+            ),
+        )
+
+        self.assertEqual(
+            rendered,
+            (
+                "LazyEnvironmentMessageSigner("
+                "state='loaded'"
+                ")"
+            ),
+        )
+
+    def test_lazy_sign_first_loads_once(
+        self,
+    ):
+        keypair = Keypair()
+
+        loaded = SoldersMessageSigner(
+            keypair
+        )
+
+        with patch(
+            "src.execution.solana_message_signer."
+            "load_solana_message_signer_from_env",
+            return_value=loaded,
+        ) as loader:
+            signer = LazyEnvironmentMessageSigner()
+
+            first = signer.sign_message(
+                b"first"
+            )
+
+            second = signer.sign_message(
+                b"second"
+            )
+
+        loader.assert_called_once_with()
+
+        self.assertEqual(
+            first,
+            keypair.sign_message(
+                b"first"
+            ),
+        )
+
+        self.assertEqual(
+            second,
+            keypair.sign_message(
+                b"second"
+            ),
+        )
+
+    def test_lazy_invalid_message_does_not_load(
+        self,
+    ):
+        with patch(
+            "src.execution.solana_message_signer."
+            "load_solana_message_signer_from_env"
+        ) as loader:
+            signer = LazyEnvironmentMessageSigner()
+
+            with self.assertRaises(
+                TypeError
+            ):
+                signer.sign_message(
+                    "not-bytes"
+                )
+
+        loader.assert_not_called()
+
+    def test_lazy_configuration_failure_is_cached(
+        self,
+    ):
+        expected = (
+            "SOLANA_KEYPAIR_ENV_MISSING:"
+            f"{DEFAULT_SOLANA_KEYPAIR_ENV}"
+        )
+
+        with patch(
+            "src.execution.solana_message_signer."
+            "load_solana_message_signer_from_env",
+            side_effect=(
+                SolanaSignerConfigurationError(
+                    expected
+                )
+            ),
+        ) as loader:
+            signer = LazyEnvironmentMessageSigner()
+
+            for _ in range(2):
+                with self.assertRaises(
+                    SolanaSignerConfigurationError
+                ) as context:
+                    signer.pubkey()
+
+                self.assertEqual(
+                    str(
+                        context.exception
+                    ),
+                    expected,
+                )
+
+            rendered = repr(
+                signer
+            )
+
+        loader.assert_called_once_with()
+
+        self.assertEqual(
+            rendered,
+            (
+                "LazyEnvironmentMessageSigner("
+                "state='failed'"
+                ")"
+            ),
+        )
+
+    def test_lazy_unexpected_loader_failure_is_sanitized_and_cached(
+        self,
+    ):
+        sensitive_text = (
+            "parser exploded with secret material"
+        )
+
+        with patch(
+            "src.execution.solana_message_signer."
+            "load_solana_message_signer_from_env",
+            side_effect=RuntimeError(
+                sensitive_text
+            ),
+        ) as loader:
+            signer = LazyEnvironmentMessageSigner()
+
+            for _ in range(2):
+                with self.assertRaises(
+                    SolanaSignerConfigurationError
+                ) as context:
+                    signer.pubkey()
+
+                message = str(
+                    context.exception
+                )
+
+                self.assertEqual(
+                    message,
+                    "SOLANA_SIGNER_LOAD_FAILED",
+                )
+
+                self.assertNotIn(
+                    sensitive_text,
+                    message,
+                )
+
+        loader.assert_called_once_with()
+
+    def test_lazy_adapter_satisfies_buy_and_sell_call_shapes(
+        self,
+    ):
+        keypair = Keypair()
+
+        loaded = SoldersMessageSigner(
+            keypair
+        )
+
+        with patch(
+            "src.execution.solana_message_signer."
+            "load_solana_message_signer_from_env",
+            return_value=loaded,
+        ) as loader:
+            signer = LazyEnvironmentMessageSigner()
+
+            buy_pubkey, buy_signature = (
+                exercise_buy_signer_shape(
+                    signer
+                )
+            )
+
+            sell_pubkey, sell_signature = (
+                exercise_sell_signer_shape(
+                    signer
+                )
+            )
+
+        loader.assert_called_once_with()
+
+        self.assertEqual(
+            buy_pubkey,
+            keypair.pubkey(),
+        )
+
+        self.assertEqual(
+            sell_pubkey,
+            keypair.pubkey(),
+        )
+
+        self.assertIsInstance(
+            buy_signature,
+            Signature,
+        )
+
+        self.assertIsInstance(
+            sell_signature,
+            Signature,
+        )
+
+    def test_lazy_adapter_has_no_instance_dictionary(
+        self,
+    ):
+        signer = LazyEnvironmentMessageSigner()
+
+        self.assertFalse(
+            hasattr(
+                signer,
+                "__dict__",
+            )
         )
 
     def test_direct_keypair_adapter_preserves_pubkey(

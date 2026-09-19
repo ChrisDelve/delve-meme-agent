@@ -31,10 +31,18 @@ from src.execution.live_process_owner import (
     LIVE_PROCESS_OWNER_VERSION,
     LiveProcessOwner,
 )
+from src.execution.live_sell_supervisor_config import (
+    LIVE_SELL_SUPERVISOR_CONFIG_VERSION,
+    LiveSellSupervisorConfig,
+)
+from src.execution.live_sell_supervisor_service import (
+    LIVE_SELL_SUPERVISOR_SERVICE_VERSION,
+    run_live_sell_supervisor_service,
+)
 
 
 LIVE_ENTRY_PROCESS_RUNNER_VERSION = (
-    "live-entry-process-runner-v1"
+    "live-entry-process-runner-v2"
 )
 
 LIVE_ENTRY_PROCESS_RECOVERY_STOPPED = (
@@ -63,6 +71,14 @@ LIVE_ENTRY_PROCESS_CONSUMER_CANCELLED = (
 
 LIVE_ENTRY_PROCESS_MAILBOX_FAILED = (
     "LIVE_ENTRY_PROCESS_MAILBOX_FAILED"
+)
+
+LIVE_ENTRY_PROCESS_SELL_STOPPED = (
+    "LIVE_ENTRY_PROCESS_SELL_STOPPED"
+)
+
+LIVE_ENTRY_PROCESS_SELL_CANCELLED = (
+    "LIVE_ENTRY_PROCESS_SELL_CANCELLED"
 )
 
 
@@ -111,6 +127,19 @@ def _valid_execution_config(
     )
 
 
+def _valid_sell_supervisor_config(
+    value: object,
+) -> bool:
+    return (
+        isinstance(
+            value,
+            LiveSellSupervisorConfig,
+        )
+        and LIVE_SELL_SUPERVISOR_CONFIG_VERSION
+        == "live-sell-supervisor-config-v1"
+    )
+
+
 def _components_are_compatible(
 ) -> bool:
     return (
@@ -122,6 +151,8 @@ def _components_are_compatible(
         == "live-entry-result-mailbox-v1"
         and LIVE_ENTRY_CAPITAL_HANDOFF_VERSION
         == "live-entry-capital-handoff-v1"
+        and LIVE_SELL_SUPERVISOR_SERVICE_VERSION
+        == "live-sell-supervisor-service-v1"
     )
 
 
@@ -142,15 +173,24 @@ async def _settle_without_cancelling(
     task: asyncio.Task[Any],
 ) -> None:
     """
-    Settle an already-owned task without injecting cancellation.
+    Settle an already-owned capital task without injecting cancellation.
 
-    Used for the capital consumer so an already-started handoff may
-    reach its downstream durable return point before owner authority is
-    released.
+    Repeated cancellation of the surrounding process runner must not
+    propagate into a BUY or SELL authority call which is already in
+    flight. Child failure remains visible.
     """
 
+    while not task.done():
+        try:
+            await asyncio.shield(
+                task
+            )
+
+        except asyncio.CancelledError:
+            continue
+
     try:
-        await task
+        task.result()
 
     except asyncio.CancelledError:
         pass
@@ -277,6 +317,7 @@ async def run_live_entry_process(
     operating_config: LiveOperatingConfig,
     evidence_config: LiveEntryEvidenceOnlyConfig,
     execution_config: LiveBuyExecutionConfig,
+    sell_supervisor_config: LiveSellSupervisorConfig,
     shutdown_event: asyncio.Event,
 ) -> None:
     """
@@ -290,15 +331,16 @@ async def run_live_entry_process(
             ↓
         one LiveProcessOwner / host-global lease
             ↓
-        recovery + collector + serial capital consumer
+        recovery + collector + serial BUY consumer
+                 + continuous SELL supervisor
             ↓
         shutdown OR child failure OR mailbox failure
             ↓
-        stop NEW handoffs
+        stop NEW BUY handoffs + NEW SELL ticks
             ↓
         stop collector / close scheduler
             ↓
-        allow already-started handoff to settle
+        allow already-started BUY/SELL authority to settle
             ↓
         stop recovery
             ↓
@@ -310,8 +352,8 @@ async def run_live_entry_process(
     max_pending_tasks. No additional production default or hidden queue
     bound is introduced.
 
-    Unexpected recovery, collector, consumer, or mailbox termination is
-    process-fatal.
+    Unexpected recovery, collector, BUY consumer, SELL supervisor, or
+    mailbox termination is process-fatal.
 
     No bootstrapping or signal-handler ownership exists here.
     """
@@ -338,6 +380,14 @@ async def run_live_entry_process(
         raise TypeError(
             "execution_config must be "
             "LiveBuyExecutionConfig"
+        )
+
+    if not _valid_sell_supervisor_config(
+        sell_supervisor_config
+    ):
+        raise TypeError(
+            "sell_supervisor_config must be "
+            "LiveSellSupervisorConfig"
         )
 
     if not isinstance(
@@ -391,6 +441,10 @@ async def run_live_entry_process(
         asyncio.Task[Any] | None
     ) = None
 
+    sell_task: (
+        asyncio.Task[Any] | None
+    ) = None
+
     mailbox_failure_task: (
         asyncio.Task[Any] | None
     ) = None
@@ -400,6 +454,7 @@ async def run_live_entry_process(
     ) = None
 
     consumer_stop_event = asyncio.Event()
+    sell_stop_event = asyncio.Event()
 
     try:
         mailbox = LiveEntryResultMailbox(
@@ -442,6 +497,25 @@ async def run_live_entry_process(
             ),
         )
 
+        sell_task = asyncio.create_task(
+            run_live_sell_supervisor_service(
+                owner=owner,
+                supervisor_config=(
+                    sell_supervisor_config
+                ),
+                execution_config=(
+                    execution_config
+                ),
+                stop_event=(
+                    sell_stop_event
+                ),
+            ),
+            name=(
+                "delve-live-entry-"
+                "sell-supervisor"
+            ),
+        )
+
         mailbox_failure_task = (
             asyncio.create_task(
                 mailbox.wait_failed(),
@@ -465,6 +539,7 @@ async def run_live_entry_process(
                 recovery_task,
                 collector_task,
                 consumer_task,
+                sell_task,
                 mailbox_failure_task,
                 shutdown_task,
             },
@@ -535,15 +610,34 @@ async def run_live_entry_process(
                 LIVE_ENTRY_PROCESS_CONSUMER_STOPPED
             )
 
+        if sell_task in done:
+            try:
+                await sell_task
+
+            except asyncio.CancelledError:
+                raise (
+                    LiveEntryProcessRunnerError(
+                        LIVE_ENTRY_PROCESS_SELL_CANCELLED
+                    )
+                ) from None
+
+            raise LiveEntryProcessRunnerError(
+                LIVE_ENTRY_PROCESS_SELL_STOPPED
+            )
+
         #
         # Otherwise the orderly shutdown task won.
         #
 
     finally:
         #
-        # First close admission to NEW capital handoffs.
+        # First close admission to NEW capital authority.
+        #
+        # BUY: no new handoffs.
+        # SELL: no new supervisor ticks.
         #
         consumer_stop_event.set()
+        sell_stop_event.set()
 
         try:
             #
@@ -567,17 +661,28 @@ async def run_live_entry_process(
             finally:
                 try:
                     #
-                    # Deliberately DO NOT cancel this task. If a BUY
-                    # handoff already crossed the authority boundary,
-                    # allow it to reach its durable downstream return
-                    # point before recovery or owner authority stops.
+                    # Deliberately DO NOT cancel either capital task.
                     #
-                    if consumer_task is not None:
-                        await (
-                            _settle_without_cancelling(
-                                consumer_task
+                    # If BUY or SELL already crossed the authority
+                    # boundary, allow it to reach its durable downstream
+                    # return point before recovery or owner authority
+                    # stops.
+                    #
+                    try:
+                        if consumer_task is not None:
+                            await (
+                                _settle_without_cancelling(
+                                    consumer_task
+                                )
                             )
-                        )
+
+                    finally:
+                        if sell_task is not None:
+                            await (
+                                _settle_without_cancelling(
+                                    sell_task
+                                )
+                            )
 
                 finally:
                     try:

@@ -21,8 +21,10 @@ from src.execution.live_entry_process_runner import (
     LIVE_ENTRY_PROCESS_MAILBOX_FAILED,
     LIVE_ENTRY_PROCESS_RECOVERY_STOPPED,
     LIVE_ENTRY_PROCESS_RUNNER_VERSION,
+    LIVE_ENTRY_PROCESS_SELL_STOPPED,
     LiveEntryProcessRunnerError,
     _run_live_entry_capital_consumer,
+    _settle_without_cancelling,
     run_live_entry_process,
 )
 from src.execution.live_entry_result_mailbox import (
@@ -30,6 +32,10 @@ from src.execution.live_entry_result_mailbox import (
 )
 from src.execution.live_operating_config import (
     LiveOperatingConfig,
+)
+from src.execution.live_sell_supervisor_config import (
+    LIVE_SELL_SUPERVISOR_CONFIG_VERSION,
+    LiveSellSupervisorConfig,
 )
 
 
@@ -45,6 +51,40 @@ WALLET = (
 class LiveEntryProcessRunnerTests(
     unittest.IsolatedAsyncioTestCase
 ):
+    def setUp(
+        self,
+    ):
+        async def sell_service_stub(
+            *,
+            owner,
+            supervisor_config,
+            execution_config,
+            stop_event,
+        ):
+            del (
+                owner,
+                supervisor_config,
+                execution_config,
+            )
+
+            await stop_event.wait()
+
+        self.sell_service = AsyncMock(
+            side_effect=sell_service_stub
+        )
+
+        self.sell_service_patcher = patch(
+            f"{MODULE}."
+            "run_live_sell_supervisor_service",
+            new=self.sell_service,
+        )
+
+        self.sell_service_patcher.start()
+
+        self.addCleanup(
+            self.sell_service_patcher.stop
+        )
+
     @staticmethod
     def operating_config(
     ) -> LiveOperatingConfig:
@@ -110,6 +150,19 @@ class LiveEntryProcessRunnerTests(
         )
 
     @staticmethod
+    def sell_config(
+    ) -> LiveSellSupervisorConfig:
+        return LiveSellSupervisorConfig(
+            config_version=(
+                LIVE_SELL_SUPERVISOR_CONFIG_VERSION
+            ),
+            take_profit_return_bps=2_000,
+            stop_loss_return_bps=-4_000,
+            max_hold_seconds=900,
+            evaluation_interval_seconds=2.0,
+        )
+
+    @staticmethod
     def scheduler():
         scheduler = Mock()
 
@@ -133,7 +186,7 @@ class LiveEntryProcessRunnerTests(
     ):
         self.assertEqual(
             LIVE_ENTRY_PROCESS_RUNNER_VERSION,
-            "live-entry-process-runner-v1",
+            "live-entry-process-runner-v2",
         )
 
     async def test_preexisting_shutdown_acquires_no_process_authority(
@@ -171,6 +224,9 @@ class LiveEntryProcessRunnerTests(
                 ),
                 execution_config=(
                     self.execution_config()
+                ),
+                sell_supervisor_config=(
+                    self.sell_config()
                 ),
                 shutdown_event=shutdown_event,
             )
@@ -270,6 +326,9 @@ class LiveEntryProcessRunnerTests(
                     operating_config=operating,
                     evidence_config=evidence,
                     execution_config=execution,
+                    sell_supervisor_config=(
+                        self.sell_config()
+                    ),
                     shutdown_event=shutdown_event,
                 )
             )
@@ -329,11 +388,117 @@ class LiveEntryProcessRunnerTests(
             execution,
         )
 
+        self.assertEqual(
+            self.sell_service.await_count,
+            1,
+        )
+
+        sell_kwargs = (
+            self.sell_service.await_args.kwargs
+        )
+
+        self.assertIs(
+            sell_kwargs["owner"],
+            owner,
+        )
+
+        self.assertIs(
+            sell_kwargs[
+                "execution_config"
+            ],
+            execution,
+        )
+
+        self.assertEqual(
+            sell_kwargs[
+                "supervisor_config"
+            ],
+            self.sell_config(),
+        )
+
+        self.assertIsInstance(
+            sell_kwargs["stop_event"],
+            asyncio.Event,
+        )
+
+        self.assertTrue(
+            sell_kwargs[
+                "stop_event"
+            ].is_set()
+        )
+
         self.assertTrue(
             scheduler.closed
         )
 
         owner.close.assert_called_once_with()
+
+    async def test_settlement_resists_repeated_cancellation(
+        self,
+    ):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        lifecycle = []
+
+        async def capital_child():
+            started.set()
+
+            try:
+                await release.wait()
+
+            except asyncio.CancelledError:
+                lifecycle.append(
+                    "child-cancelled"
+                )
+                raise
+
+            lifecycle.append(
+                "child-return"
+            )
+
+        child = asyncio.create_task(
+            capital_child()
+        )
+
+        await started.wait()
+
+        settlement = asyncio.create_task(
+            _settle_without_cancelling(
+                child
+            )
+        )
+
+        await asyncio.sleep(0)
+
+        settlement.cancel()
+        await asyncio.sleep(0)
+
+        self.assertFalse(
+            child.done()
+        )
+
+        settlement.cancel()
+        await asyncio.sleep(0)
+
+        self.assertFalse(
+            child.done()
+        )
+
+        self.assertEqual(
+            lifecycle,
+            [],
+        )
+
+        release.set()
+
+        await settlement
+
+        self.assertEqual(
+            lifecycle,
+            [
+                "child-return",
+            ],
+        )
 
     async def test_consumer_stop_prevents_new_handoff(
         self,
@@ -517,6 +682,9 @@ class LiveEntryProcessRunnerTests(
                     execution_config=(
                         self.execution_config()
                     ),
+                    sell_supervisor_config=(
+                        self.sell_config()
+                    ),
                     shutdown_event=(
                         asyncio.Event()
                     ),
@@ -599,6 +767,9 @@ class LiveEntryProcessRunnerTests(
                     ),
                     execution_config=(
                         self.execution_config()
+                    ),
+                    sell_supervisor_config=(
+                        self.sell_config()
                     ),
                     shutdown_event=(
                         asyncio.Event()
@@ -692,6 +863,9 @@ class LiveEntryProcessRunnerTests(
                     execution_config=(
                         self.execution_config()
                     ),
+                    sell_supervisor_config=(
+                        self.sell_config()
+                    ),
                     shutdown_event=(
                         asyncio.Event()
                     ),
@@ -770,6 +944,9 @@ class LiveEntryProcessRunnerTests(
                     execution_config=(
                         self.execution_config()
                     ),
+                    sell_supervisor_config=(
+                        self.sell_config()
+                    ),
                     shutdown_event=(
                         asyncio.Event()
                     ),
@@ -777,6 +954,375 @@ class LiveEntryProcessRunnerTests(
 
         owner.close.assert_called_once_with()
 
+
+    async def test_normal_sell_supervisor_return_is_process_fatal(
+        self,
+    ):
+        scheduler = self.scheduler()
+
+        mailbox = Mock()
+        mailbox.wait_failed = AsyncMock(
+            side_effect=self.forever
+        )
+
+        owner = Mock()
+        owner.run_recovery_service = AsyncMock(
+            side_effect=self.forever
+        )
+        owner.close = Mock()
+
+        async def collector_stub(
+            *,
+            scheduler,
+            mailbox,
+        ):
+            del (
+                scheduler,
+                mailbox,
+            )
+            await asyncio.Event().wait()
+
+        async def consumer_stub(
+            *,
+            owner,
+            mailbox,
+            execution_config,
+            stop_event,
+        ):
+            del (
+                owner,
+                mailbox,
+                execution_config,
+            )
+            await stop_event.wait()
+
+        self.sell_service.side_effect = None
+        self.sell_service.return_value = None
+
+        with (
+            patch(
+                f"{MODULE}.LiveEntryCandidateScheduler",
+                return_value=scheduler,
+            ),
+            patch(
+                f"{MODULE}.LiveEntryResultMailbox",
+                return_value=mailbox,
+            ),
+            patch(
+                f"{MODULE}.LiveProcessOwner",
+                return_value=owner,
+            ),
+            patch(
+                f"{MODULE}."
+                "_run_market_collector_with_live_entry",
+                new=AsyncMock(
+                    side_effect=collector_stub
+                ),
+            ),
+            patch(
+                f"{MODULE}."
+                "_run_live_entry_capital_consumer",
+                new=AsyncMock(
+                    side_effect=consumer_stub
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                LiveEntryProcessRunnerError,
+                "^"
+                + LIVE_ENTRY_PROCESS_SELL_STOPPED
+                + "$",
+            ):
+                await run_live_entry_process(
+                    operating_config=(
+                        self.operating_config()
+                    ),
+                    evidence_config=(
+                        self.evidence_config()
+                    ),
+                    execution_config=(
+                        self.execution_config()
+                    ),
+                    sell_supervisor_config=(
+                        self.sell_config()
+                    ),
+                    shutdown_event=(
+                        asyncio.Event()
+                    ),
+                )
+
+        owner.close.assert_called_once_with()
+
+    async def test_sell_supervisor_exception_propagates_and_closes_owner(
+        self,
+    ):
+        scheduler = self.scheduler()
+
+        mailbox = Mock()
+        mailbox.wait_failed = AsyncMock(
+            side_effect=self.forever
+        )
+
+        owner = Mock()
+        owner.run_recovery_service = AsyncMock(
+            side_effect=self.forever
+        )
+        owner.close = Mock()
+
+        async def collector_stub(
+            *,
+            scheduler,
+            mailbox,
+        ):
+            del (
+                scheduler,
+                mailbox,
+            )
+            await asyncio.Event().wait()
+
+        async def consumer_stub(
+            *,
+            owner,
+            mailbox,
+            execution_config,
+            stop_event,
+        ):
+            del (
+                owner,
+                mailbox,
+                execution_config,
+            )
+            await stop_event.wait()
+
+        self.sell_service.side_effect = (
+            RuntimeError(
+                "sell supervisor boom"
+            )
+        )
+
+        with (
+            patch(
+                f"{MODULE}.LiveEntryCandidateScheduler",
+                return_value=scheduler,
+            ),
+            patch(
+                f"{MODULE}.LiveEntryResultMailbox",
+                return_value=mailbox,
+            ),
+            patch(
+                f"{MODULE}.LiveProcessOwner",
+                return_value=owner,
+            ),
+            patch(
+                f"{MODULE}."
+                "_run_market_collector_with_live_entry",
+                new=AsyncMock(
+                    side_effect=collector_stub
+                ),
+            ),
+            patch(
+                f"{MODULE}."
+                "_run_live_entry_capital_consumer",
+                new=AsyncMock(
+                    side_effect=consumer_stub
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^sell supervisor boom$",
+            ):
+                await run_live_entry_process(
+                    operating_config=(
+                        self.operating_config()
+                    ),
+                    evidence_config=(
+                        self.evidence_config()
+                    ),
+                    execution_config=(
+                        self.execution_config()
+                    ),
+                    sell_supervisor_config=(
+                        self.sell_config()
+                    ),
+                    shutdown_event=(
+                        asyncio.Event()
+                    ),
+                )
+
+        owner.close.assert_called_once_with()
+
+    async def test_shutdown_waits_for_active_sell_before_owner_close(
+        self,
+    ):
+        scheduler = self.scheduler()
+
+        mailbox = Mock()
+        mailbox.wait_failed = AsyncMock(
+            side_effect=self.forever
+        )
+
+        owner = Mock()
+        owner.run_recovery_service = AsyncMock(
+            side_effect=self.forever
+        )
+
+        lifecycle = []
+
+        def close_owner():
+            lifecycle.append(
+                "owner-close"
+            )
+
+        owner.close = Mock(
+            side_effect=close_owner
+        )
+
+        async def collector_stub(
+            *,
+            scheduler,
+            mailbox,
+        ):
+            del (
+                scheduler,
+                mailbox,
+            )
+
+            await asyncio.Event().wait()
+
+        async def consumer_stub(
+            *,
+            owner,
+            mailbox,
+            execution_config,
+            stop_event,
+        ):
+            del (
+                owner,
+                mailbox,
+                execution_config,
+            )
+
+            await stop_event.wait()
+
+        sell_started = asyncio.Event()
+        sell_stop_seen = asyncio.Event()
+        release_sell = asyncio.Event()
+
+        async def sell_stub(
+            *,
+            owner,
+            supervisor_config,
+            execution_config,
+            stop_event,
+        ):
+            del (
+                owner,
+                supervisor_config,
+                execution_config,
+            )
+
+            sell_started.set()
+
+            #
+            # Do not return merely because process shutdown was
+            # requested. This models an already-active SELL tick:
+            # the supervisor observes stop admission, but the
+            # in-flight authority call still has to settle.
+            #
+            await stop_event.wait()
+
+            sell_stop_seen.set()
+
+            await release_sell.wait()
+
+            lifecycle.append(
+                "sell-return"
+            )
+
+        self.sell_service.side_effect = (
+            sell_stub
+        )
+
+        shutdown_event = asyncio.Event()
+
+        with (
+            patch(
+                f"{MODULE}.LiveEntryCandidateScheduler",
+                return_value=scheduler,
+            ),
+            patch(
+                f"{MODULE}.LiveEntryResultMailbox",
+                return_value=mailbox,
+            ),
+            patch(
+                f"{MODULE}.LiveProcessOwner",
+                return_value=owner,
+            ),
+            patch(
+                f"{MODULE}."
+                "_run_market_collector_with_live_entry",
+                new=AsyncMock(
+                    side_effect=collector_stub
+                ),
+            ),
+            patch(
+                f"{MODULE}."
+                "_run_live_entry_capital_consumer",
+                new=AsyncMock(
+                    side_effect=consumer_stub
+                ),
+            ),
+        ):
+            runner = asyncio.create_task(
+                run_live_entry_process(
+                    operating_config=(
+                        self.operating_config()
+                    ),
+                    evidence_config=(
+                        self.evidence_config()
+                    ),
+                    execution_config=(
+                        self.execution_config()
+                    ),
+                    sell_supervisor_config=(
+                        self.sell_config()
+                    ),
+                    shutdown_event=shutdown_event,
+                )
+            )
+
+            await sell_started.wait()
+
+            shutdown_event.set()
+
+            #
+            # This is the deterministic boundary:
+            #
+            # wait until the runner has chosen orderly shutdown
+            # and closed admission to NEW SELL ticks.
+            #
+            await sell_stop_seen.wait()
+
+            self.assertFalse(
+                runner.done()
+            )
+
+            owner.close.assert_not_called()
+
+            release_sell.set()
+
+            await runner
+
+        self.assertEqual(
+            lifecycle,
+            [
+                "sell-return",
+                "owner-close",
+            ],
+        )
+
+        owner.close.assert_called_once_with()
 
     async def test_runner_cancellation_waits_for_active_consumer_before_close(
         self,
@@ -869,6 +1415,9 @@ class LiveEntryProcessRunnerTests(
                     ),
                     execution_config=(
                         self.execution_config()
+                    ),
+                    sell_supervisor_config=(
+                        self.sell_config()
                     ),
                     shutdown_event=(
                         asyncio.Event()
@@ -989,6 +1538,9 @@ class LiveEntryProcessRunnerTests(
                     ),
                     execution_config=(
                         self.execution_config()
+                    ),
+                    sell_supervisor_config=(
+                        self.sell_config()
                     ),
                     shutdown_event=shutdown_event,
                 )

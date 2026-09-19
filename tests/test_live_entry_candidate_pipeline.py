@@ -288,6 +288,92 @@ class LiveEntryCandidatePipelineTests(
         )
         resolver.assert_not_awaited()
 
+    async def test_policy_exception_fails_closed(
+        self,
+    ):
+        with (
+            patch(
+                "src.execution."
+                "live_entry_candidate_pipeline."
+                "evaluate_live_entry_candidate",
+                side_effect=RuntimeError(
+                    "boom"
+                ),
+            ),
+            patch(
+                "src.execution."
+                "live_entry_candidate_pipeline."
+                "resolve_live_entry_evidence",
+                new_callable=AsyncMock,
+            ) as resolver,
+        ):
+            result = await self.run_pipeline()
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            POLICY,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_ENTRY_PIPELINE_"
+                "POLICY_EXCEPTION",
+            ),
+        )
+        self.assertIsNotNone(
+            result.candidate
+        )
+        self.assertIsNone(
+            result.policy_decision
+        )
+        resolver.assert_not_awaited()
+
+    async def test_invalid_policy_contract_fails_closed(
+        self,
+    ):
+        with (
+            patch(
+                "src.execution."
+                "live_entry_candidate_pipeline."
+                "evaluate_live_entry_candidate",
+                return_value=object(),
+            ),
+            patch(
+                "src.execution."
+                "live_entry_candidate_pipeline."
+                "resolve_live_entry_evidence",
+                new_callable=AsyncMock,
+            ) as resolver,
+        ):
+            result = await self.run_pipeline()
+
+        self.assertEqual(
+            result.status,
+            UNKNOWN,
+        )
+        self.assertEqual(
+            result.stage,
+            POLICY,
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "LIVE_ENTRY_PIPELINE_"
+                "POLICY_CONTRACT_INVALID",
+            ),
+        )
+        self.assertIsNotNone(
+            result.candidate
+        )
+        self.assertIsNone(
+            result.policy_decision
+        )
+        resolver.assert_not_awaited()
+
     async def test_policy_reject_stops_before_evidence(
         self,
     ):

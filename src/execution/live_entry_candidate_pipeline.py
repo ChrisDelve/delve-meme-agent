@@ -158,15 +158,6 @@ class LiveEntryCandidatePipelineResult:
             )
 
         if self.stage == POLICY:
-            if not isinstance(
-                self.policy_decision,
-                LiveEntryPolicyDecision,
-            ):
-                raise ValueError(
-                    "POLICY stage requires "
-                    "policy decision"
-                )
-
             if (
                 self.evidence_resolution
                 is not None
@@ -174,6 +165,45 @@ class LiveEntryCandidatePipelineResult:
                 raise ValueError(
                     "POLICY stage cannot contain "
                     "evidence resolution"
+                )
+
+            if self.policy_decision is None:
+                #
+                # Policy orchestration can fail before a trusted
+                # LiveEntryPolicyDecision exists:
+                #
+                #   - evaluator raised an ordinary exception;
+                #   - evaluator returned an invalid contract.
+                #
+                # These remain fail-closed UNKNOWN.
+                #
+                if (
+                    self.status == UNKNOWN
+                    and self.reasons in (
+                        (
+                            "LIVE_ENTRY_PIPELINE_"
+                            "POLICY_EXCEPTION",
+                        ),
+                        (
+                            "LIVE_ENTRY_PIPELINE_"
+                            "POLICY_CONTRACT_INVALID",
+                        ),
+                    )
+                ):
+                    return
+
+                raise ValueError(
+                    "POLICY stage requires "
+                    "policy decision"
+                )
+
+            if not isinstance(
+                self.policy_decision,
+                LiveEntryPolicyDecision,
+            ):
+                raise ValueError(
+                    "POLICY stage requires "
+                    "policy decision"
                 )
 
             expected_status = {
@@ -475,6 +505,276 @@ def _valid_evidence_resolution(
     )
 
 
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class LiveEntryCandidatePolicyPreparation:
+    """
+    Canonical non-RPC adapter + policy preparation.
+
+    terminal_result is populated when processing ends at ADAPTER or
+    POLICY.
+
+    terminal_result=None means the exact candidate received a trusted
+    PASS policy decision and may proceed to fresh evidence resolution.
+
+    This object itself grants no capital authority.
+    """
+
+    candidate: ModelEntryCandidate | None
+    policy_decision: (
+        LiveEntryPolicyDecision | None
+    )
+    terminal_result: (
+        LiveEntryCandidatePipelineResult | None
+    )
+
+    def __post_init__(
+        self,
+    ) -> None:
+        if self.terminal_result is None:
+            if (
+                not isinstance(
+                    self.candidate,
+                    ModelEntryCandidate,
+                )
+                or self.candidate.candidate_version
+                != MODEL_ENTRY_CANDIDATE_VERSION
+            ):
+                raise ValueError(
+                    "continuing preparation requires "
+                    "candidate"
+                )
+
+            if (
+                not isinstance(
+                    self.policy_decision,
+                    LiveEntryPolicyDecision,
+                )
+                or self.policy_decision.status
+                != POLICY_PASS
+            ):
+                raise ValueError(
+                    "continuing preparation requires "
+                    "PASS policy decision"
+                )
+
+            return
+
+        if not isinstance(
+            self.terminal_result,
+            LiveEntryCandidatePipelineResult,
+        ):
+            raise ValueError(
+                "terminal_result is invalid"
+            )
+
+        if self.terminal_result.stage not in (
+            ADAPTER,
+            POLICY,
+        ):
+            raise ValueError(
+                "terminal preparation stage is invalid"
+            )
+
+        if self.terminal_result.status == PASS:
+            raise ValueError(
+                "terminal preparation cannot PASS"
+            )
+
+        if self.terminal_result.stage == ADAPTER:
+            if (
+                self.candidate is not None
+                or self.policy_decision
+                is not None
+            ):
+                raise ValueError(
+                    "ADAPTER terminal preparation "
+                    "cannot contain downstream state"
+                )
+
+            return
+
+        if (
+            self.candidate
+            is not self.terminal_result.candidate
+            or self.policy_decision
+            is not self.terminal_result.policy_decision
+        ):
+            raise ValueError(
+                "POLICY terminal preparation "
+                "state mismatch"
+            )
+
+    @property
+    def should_resolve_evidence(
+        self,
+    ) -> bool:
+        return self.terminal_result is None
+
+
+def prepare_live_entry_candidate_policy_once(
+    *,
+    prediction: Mapping[str, Any],
+    entry_signature: str,
+    mint: str,
+    event_user: str,
+    quote_mint: str,
+    slot: int | None,
+    trade_timestamp: int,
+    observed_at: int,
+    signal_virtual_quote_reserves: int,
+    signal_virtual_token_reserves: int,
+    policy: LiveEntryPolicy,
+    evaluated_at: int,
+) -> LiveEntryCandidatePolicyPreparation:
+    """
+    Resolve only the deterministic non-RPC portion of the live-entry
+    candidate pipeline.
+
+    No fresh evidence RPC, SQLite access, signer, reservation, BUY,
+    SELL, transaction construction, or capital authority is reachable
+    here.
+    """
+
+    def terminal(
+        *,
+        status: str,
+        stage: str,
+        reasons: tuple[str, ...],
+        candidate: (
+            ModelEntryCandidate | None
+        ) = None,
+        policy_decision: (
+            LiveEntryPolicyDecision | None
+        ) = None,
+    ) -> LiveEntryCandidatePolicyPreparation:
+        result = LiveEntryCandidatePipelineResult(
+            pipeline_version=(
+                LIVE_ENTRY_CANDIDATE_PIPELINE_VERSION
+            ),
+            status=status,
+            stage=stage,
+            reasons=reasons,
+            candidate=candidate,
+            policy_decision=policy_decision,
+            evidence_resolution=None,
+        )
+
+        return LiveEntryCandidatePolicyPreparation(
+            candidate=candidate,
+            policy_decision=policy_decision,
+            terminal_result=result,
+        )
+
+    if not _components_are_compatible():
+        return terminal(
+            status=UNKNOWN,
+            stage=ADAPTER,
+            reasons=(
+                "LIVE_ENTRY_PIPELINE_"
+                "COMPONENT_VERSION_MISMATCH",
+            ),
+        )
+
+    try:
+        candidate = adapt_model_entry_candidate(
+            prediction=prediction,
+            entry_signature=entry_signature,
+            mint=mint,
+            event_user=event_user,
+            quote_mint=quote_mint,
+            slot=slot,
+            trade_timestamp=trade_timestamp,
+            observed_at=observed_at,
+            signal_virtual_quote_reserves=(
+                signal_virtual_quote_reserves
+            ),
+            signal_virtual_token_reserves=(
+                signal_virtual_token_reserves
+            ),
+        )
+
+    except Exception:
+        return terminal(
+            status=UNKNOWN,
+            stage=ADAPTER,
+            reasons=(
+                "LIVE_ENTRY_PIPELINE_"
+                "CANDIDATE_INVALID",
+            ),
+        )
+
+    try:
+        policy_decision = (
+            evaluate_live_entry_candidate(
+                candidate=candidate,
+                evaluated_at=evaluated_at,
+                policy=policy,
+            )
+        )
+
+    except Exception:
+        return terminal(
+            status=UNKNOWN,
+            stage=POLICY,
+            reasons=(
+                "LIVE_ENTRY_PIPELINE_"
+                "POLICY_EXCEPTION",
+            ),
+            candidate=candidate,
+        )
+
+    if not _valid_policy_decision(
+        decision=policy_decision,
+        candidate=candidate,
+        policy=policy,
+        evaluated_at=evaluated_at,
+    ):
+        return terminal(
+            status=UNKNOWN,
+            stage=POLICY,
+            reasons=(
+                "LIVE_ENTRY_PIPELINE_"
+                "POLICY_CONTRACT_INVALID",
+            ),
+            candidate=candidate,
+        )
+
+    if policy_decision.status == POLICY_REJECT:
+        return terminal(
+            status=REJECT,
+            stage=POLICY,
+            reasons=tuple(
+                "POLICY:" + reason
+                for reason
+                in policy_decision.reasons
+            ),
+            candidate=candidate,
+            policy_decision=policy_decision,
+        )
+
+    if policy_decision.status == POLICY_UNKNOWN:
+        return terminal(
+            status=UNKNOWN,
+            stage=POLICY,
+            reasons=tuple(
+                "POLICY:" + reason
+                for reason
+                in policy_decision.reasons
+            ),
+            candidate=candidate,
+            policy_decision=policy_decision,
+        )
+
+    return LiveEntryCandidatePolicyPreparation(
+        candidate=candidate,
+        policy_decision=policy_decision,
+        terminal_result=None,
+    )
+
+
 async def resolve_live_entry_candidate_evidence_once(
     *,
     prediction: Mapping[str, Any],
@@ -542,112 +842,44 @@ async def resolve_live_entry_candidate_evidence_once(
             ),
         )
 
-    if not _components_are_compatible():
-        return finish(
-            status=UNKNOWN,
-            stage=ADAPTER,
-            reasons=(
-                "LIVE_ENTRY_PIPELINE_"
-                "COMPONENT_VERSION_MISMATCH",
+    preparation = (
+        prepare_live_entry_candidate_policy_once(
+            prediction=prediction,
+            entry_signature=entry_signature,
+            mint=mint,
+            event_user=event_user,
+            quote_mint=quote_mint,
+            slot=slot,
+            trade_timestamp=trade_timestamp,
+            observed_at=observed_at,
+            signal_virtual_quote_reserves=(
+                signal_virtual_quote_reserves
             ),
-        )
-
-    try:
-        candidate = (
-            adapt_model_entry_candidate(
-                prediction=prediction,
-                entry_signature=(
-                    entry_signature
-                ),
-                mint=mint,
-                event_user=event_user,
-                quote_mint=quote_mint,
-                slot=slot,
-                trade_timestamp=(
-                    trade_timestamp
-                ),
-                observed_at=observed_at,
-                signal_virtual_quote_reserves=(
-                    signal_virtual_quote_reserves
-                ),
-                signal_virtual_token_reserves=(
-                    signal_virtual_token_reserves
-                ),
-            )
-        )
-    except Exception:
-        return finish(
-            status=UNKNOWN,
-            stage=ADAPTER,
-            reasons=(
-                "LIVE_ENTRY_PIPELINE_"
-                "CANDIDATE_INVALID",
+            signal_virtual_token_reserves=(
+                signal_virtual_token_reserves
             ),
+            policy=policy,
+            evaluated_at=evaluated_at,
         )
+    )
 
-    try:
-        policy_decision = (
-            evaluate_live_entry_candidate(
-                candidate=candidate,
-                evaluated_at=evaluated_at,
-                policy=policy,
-            )
-        )
-    except Exception:
-        return finish(
-            status=UNKNOWN,
-            stage=POLICY,
-            reasons=(
-                "LIVE_ENTRY_PIPELINE_"
-                "POLICY_EXCEPTION",
-            ),
-            candidate=candidate,
-        )
+    if preparation.terminal_result is not None:
+        return preparation.terminal_result
 
-    if not _valid_policy_decision(
-        decision=policy_decision,
-        candidate=candidate,
-        policy=policy,
-        evaluated_at=evaluated_at,
+    candidate = preparation.candidate
+    policy_decision = preparation.policy_decision
+
+    #
+    # LiveEntryCandidatePolicyPreparation proves these are populated
+    # whenever processing is allowed to continue.
+    #
+    if (
+        candidate is None
+        or policy_decision is None
     ):
-        return finish(
-            status=UNKNOWN,
-            stage=POLICY,
-            reasons=(
-                "LIVE_ENTRY_PIPELINE_"
-                "POLICY_CONTRACT_INVALID",
-            ),
-            candidate=candidate,
-        )
-
-    if policy_decision.status == POLICY_REJECT:
-        return finish(
-            status=REJECT,
-            stage=POLICY,
-            reasons=tuple(
-                "POLICY:" + reason
-                for reason
-                in policy_decision.reasons
-            ),
-            candidate=candidate,
-            policy_decision=(
-                policy_decision
-            ),
-        )
-
-    if policy_decision.status == POLICY_UNKNOWN:
-        return finish(
-            status=UNKNOWN,
-            stage=POLICY,
-            reasons=tuple(
-                "POLICY:" + reason
-                for reason
-                in policy_decision.reasons
-            ),
-            candidate=candidate,
-            policy_decision=(
-                policy_decision
-            ),
+        raise RuntimeError(
+            "LIVE_ENTRY_PIPELINE_"
+            "PREPARATION_CONTRACT_INVALID"
         )
 
     try:

@@ -13,8 +13,43 @@ from src.safety.token_safety_resolver import (
 
 
 SOLANA_SINGLE_ATTEMPT_RPC_VERSION = (
-    "solana-single-attempt-rpc-v1"
+    "solana-single-attempt-rpc-v2"
 )
+
+SOLANA_MAINNET_RPC_PREFIX = (
+    "https://mainnet.helius-rpc.com/?api-key="
+)
+
+
+def _rpc_url_is_canonical_mainnet(
+    value: object,
+) -> bool:
+    """
+    Deterministic production network identity check.
+
+    This performs no RPC call and therefore cannot consume relay
+    attempts or block recovery reads.
+
+    The production writer is intentionally bound to Helius Solana
+    mainnet. A future configurable provider/cluster must introduce a
+    new explicit network-identity contract rather than weakening this
+    check.
+    """
+    return (
+        isinstance(
+            value,
+            str,
+        )
+        and value.startswith(
+            SOLANA_MAINNET_RPC_PREFIX
+        )
+        and len(
+            value
+        )
+        > len(
+            SOLANA_MAINNET_RPC_PREFIX
+        )
+    )
 
 
 class SingleAttemptRpcWriteError(
@@ -48,6 +83,7 @@ class SingleAttemptSolanaRpcClient:
     HTTP POST per send_transaction_once() call.
 
     It contains:
+    - canonical Helius Solana mainnet endpoint enforcement
     - no HTTP retry loop
     - no 429 retry
     - no 5xx retry
@@ -101,6 +137,13 @@ class SingleAttemptSolanaRpcClient:
         if self.session is None:
             raise SingleAttemptRpcWriteError(
                 "RPC_SESSION_NOT_OPEN"
+            )
+
+        if not _rpc_url_is_canonical_mainnet(
+            RPC_URL
+        ):
+            raise SingleAttemptRpcWriteError(
+                "RPC_ENDPOINT_NOT_CANONICAL_MAINNET"
             )
 
         if (

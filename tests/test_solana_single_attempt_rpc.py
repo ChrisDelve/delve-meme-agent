@@ -1,11 +1,13 @@
 import base64
 import unittest
+from unittest.mock import patch
 
 import aiohttp
 
 from solders.keypair import Keypair
 
 from src.execution.solana_single_attempt_rpc import (
+    SOLANA_MAINNET_RPC_PREFIX,
     SOLANA_SINGLE_ATTEMPT_RPC_VERSION,
     SingleAttemptRpcWriteError,
     SingleAttemptSolanaRpcClient,
@@ -155,7 +157,7 @@ class SingleAttemptSolanaRpcTests(
 
         self.assertEqual(
             SOLANA_SINGLE_ATTEMPT_RPC_VERSION,
-            "solana-single-attempt-rpc-v1",
+            "solana-single-attempt-rpc-v2",
         )
 
         self.assertEqual(
@@ -200,6 +202,133 @@ class SingleAttemptSolanaRpcTests(
                 "maxRetries": 0,
                 "minContextSlot": 200,
             },
+        )
+
+    def test_canonical_mainnet_prefix_is_locked(
+        self,
+    ):
+        self.assertEqual(
+            SOLANA_MAINNET_RPC_PREFIX,
+            (
+                "https://mainnet.helius-rpc.com/"
+                "?api-key="
+            ),
+        )
+
+        self.assertTrue(
+            RPC_URL.startswith(
+                SOLANA_MAINNET_RPC_PREFIX
+            )
+        )
+
+        self.assertGreater(
+            len(
+                RPC_URL
+            ),
+            len(
+                SOLANA_MAINNET_RPC_PREFIX
+            ),
+        )
+
+    async def test_non_mainnet_endpoint_fails_before_post(
+        self,
+    ):
+        session = FakeSession(
+            responses=[
+                FakeResponse(
+                    json_body={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": self.signature,
+                    }
+                )
+            ]
+        )
+
+        client = self.client_with_session(
+            session
+        )
+
+        with patch(
+            (
+                "src.execution."
+                "solana_single_attempt_rpc."
+                "RPC_URL"
+            ),
+            (
+                "https://devnet.helius-rpc.com/"
+                "?api-key=test"
+            ),
+        ):
+            with self.assertRaises(
+                SingleAttemptRpcWriteError
+            ) as raised:
+                await client.send_transaction_once(
+                    signed_transaction_bytes=(
+                        self.transaction_bytes
+                    ),
+                    min_context_slot=(
+                        self.min_context_slot
+                    ),
+                )
+
+        self.assertEqual(
+            raised.exception.reason,
+            "RPC_ENDPOINT_NOT_CANONICAL_MAINNET",
+        )
+
+        self.assertEqual(
+            session.calls,
+            [],
+        )
+
+    async def test_empty_mainnet_api_key_fails_before_post(
+        self,
+    ):
+        session = FakeSession(
+            responses=[
+                FakeResponse(
+                    json_body={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": self.signature,
+                    }
+                )
+            ]
+        )
+
+        client = self.client_with_session(
+            session
+        )
+
+        with patch(
+            (
+                "src.execution."
+                "solana_single_attempt_rpc."
+                "RPC_URL"
+            ),
+            SOLANA_MAINNET_RPC_PREFIX,
+        ):
+            with self.assertRaises(
+                SingleAttemptRpcWriteError
+            ) as raised:
+                await client.send_transaction_once(
+                    signed_transaction_bytes=(
+                        self.transaction_bytes
+                    ),
+                    min_context_slot=(
+                        self.min_context_slot
+                    ),
+                )
+
+        self.assertEqual(
+            raised.exception.reason,
+            "RPC_ENDPOINT_NOT_CANONICAL_MAINNET",
+        )
+
+        self.assertEqual(
+            session.calls,
+            [],
         )
 
     async def test_429_is_not_retried(

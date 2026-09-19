@@ -126,8 +126,13 @@ def decode_create_v2_instruction(instruction):
     }
 
 
-async def fetch_transaction(signature: str):
-    payload = {
+MAX_SUPPORTED_TRANSACTION_VERSION = 1
+
+
+def build_get_transaction_payload(
+    signature: str,
+) -> dict:
+    return {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "getTransaction",
@@ -136,10 +141,18 @@ async def fetch_transaction(signature: str):
             {
                 "encoding": "jsonParsed",
                 "commitment": "confirmed",
-                "maxSupportedTransactionVersion": 0,
+                "maxSupportedTransactionVersion": (
+                    MAX_SUPPORTED_TRANSACTION_VERSION
+                ),
             },
         ],
     }
+
+
+async def fetch_transaction(signature: str):
+    payload = build_get_transaction_payload(
+        signature
+    )
 
     connector = aiohttp.TCPConnector(
         ssl=SSL_CONTEXT

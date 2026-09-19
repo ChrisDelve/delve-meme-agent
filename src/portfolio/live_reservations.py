@@ -647,6 +647,65 @@ def reserve_pump_buy_capital(
                 risk_result=None,
             )
 
+        #
+        # Durable same-mint economic authority.
+        #
+        # An ACTIVE/SIGNED/SUBMITTED reservation above
+        # protects an in-progress BUY. Once a successful
+        # BUY reconciles, that reservation becomes RELEASED
+        # and the durable OPEN position becomes authoritative.
+        #
+        # Do not implicitly pyramid into a mint that this
+        # wallet already owns. Future intentional scale-in
+        # behavior must be granted by an explicit policy,
+        # not by repeated candidate events.
+        #
+        # live_positions does not exist on a pristine
+        # reservation-only database, so table absence alone
+        # is not an error here. In the production path the
+        # authoritative account-state resolver separately
+        # validates the live-position book before reservation.
+        #
+        live_positions_table = connection.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'live_positions'
+            LIMIT 1
+            """
+        ).fetchone()
+
+        if live_positions_table is not None:
+            existing_open_position = (
+                connection.execute(
+                    """
+                    SELECT 1
+                    FROM live_positions
+                    WHERE wallet_pubkey = ?
+                      AND mint = ?
+                      AND status = 'OPEN'
+                    LIMIT 1
+                    """,
+                    (
+                        wallet_pubkey,
+                        mint,
+                    ),
+                ).fetchone()
+            )
+
+            if existing_open_position is not None:
+                connection.commit()
+
+                return ReservationDecision(
+                    status="BLOCK",
+                    reasons=(
+                        "OPEN_POSITION_ALREADY_EXISTS_FOR_MINT",
+                    ),
+                    reservation=None,
+                    risk_result=None,
+                )
+
         (
             reserved_exposure,
             reserved_cash,

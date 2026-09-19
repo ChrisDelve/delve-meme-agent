@@ -185,6 +185,55 @@ class LiveReservationTests(unittest.TestCase):
             db_path=self.db_path,
         )
 
+    def seed_live_position_guard_row(
+        self,
+        *,
+        mint: str,
+        wallet_pubkey: str | None = None,
+        status: str = "OPEN",
+    ) -> None:
+        if wallet_pubkey is None:
+            wallet_pubkey = self.wallet_pubkey
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS
+                live_positions (
+                    position_id INTEGER PRIMARY KEY
+                        AUTOINCREMENT,
+                    wallet_pubkey TEXT NOT NULL,
+                    mint TEXT NOT NULL,
+                    status TEXT NOT NULL
+                )
+                """
+            )
+
+            connection.execute(
+                """
+                INSERT INTO live_positions (
+                    wallet_pubkey,
+                    mint,
+                    status
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    wallet_pubkey,
+                    mint,
+                    status,
+                ),
+            )
+
+            connection.commit()
+
+        finally:
+            connection.close()
+
     def test_invalid_wallet_pubkey_fails_closed(
         self,
     ):
@@ -413,6 +462,98 @@ class LiveReservationTests(unittest.TestCase):
         self.assertEqual(
             prior_counts,
             [0, 1],
+        )
+
+    def test_open_position_for_wallet_mint_blocks_new_reservation(
+        self,
+    ):
+        self.seed_live_position_guard_row(
+            mint="MintA",
+        )
+
+        result = self.reserve(
+            "MintA"
+        )
+
+        self.assertEqual(
+            result.status,
+            "BLOCK",
+        )
+        self.assertEqual(
+            result.reasons,
+            (
+                "OPEN_POSITION_ALREADY_EXISTS_FOR_MINT",
+            ),
+        )
+        self.assertIsNone(
+            result.reservation
+        )
+        self.assertIsNone(
+            result.risk_result
+        )
+
+        connection = get_connection(
+            self.db_path
+        )
+
+        try:
+            count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM live_capital_reservations
+                """
+            ).fetchone()[0]
+
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            count,
+            0,
+        )
+
+    def test_closed_same_mint_position_allows_reentry(
+        self,
+    ):
+        self.seed_live_position_guard_row(
+            mint="MintA",
+            status="CLOSED",
+        )
+
+        result = self.reserve(
+            "MintA"
+        )
+
+        self.assertEqual(
+            result.status,
+            "PASS",
+        )
+        self.assertIsNotNone(
+            result.reservation
+        )
+
+    def test_other_wallet_open_same_mint_does_not_block(
+        self,
+    ):
+        other_wallet = str(
+            Pubkey.new_unique()
+        )
+
+        self.seed_live_position_guard_row(
+            mint="MintA",
+            wallet_pubkey=other_wallet,
+        )
+
+        result = self.reserve(
+            "MintA"
+        )
+
+        self.assertEqual(
+            result.status,
+            "PASS",
+        )
+        self.assertIsNotNone(
+            result.reservation
         )
 
     def test_duplicate_active_mint_blocks(self):

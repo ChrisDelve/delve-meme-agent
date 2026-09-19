@@ -7,8 +7,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.execution.live_entry_candidate_pipeline import (
+    ADAPTER,
+    POLICY,
     LIVE_ENTRY_CANDIDATE_PIPELINE_VERSION,
     LiveEntryCandidatePipelineResult,
+    prepare_live_entry_candidate_policy_once,
     resolve_live_entry_candidate_evidence_once,
 )
 from src.strategies.live_entry_policy import (
@@ -18,14 +21,15 @@ from src.strategies.live_entry_policy import (
 
 
 LIVE_ENTRY_CANDIDATE_SCHEDULER_VERSION = (
-    "live-entry-candidate-scheduler-v1"
+    "live-entry-candidate-scheduler-v2"
 )
 
 LIVE_ENTRY_SCHEDULE_RESULT_VERSION = (
-    "live-entry-schedule-result-v1"
+    "live-entry-schedule-result-v2"
 )
 
 SCHEDULED = "SCHEDULED"
+RESOLVED = "RESOLVED"
 BLOCKED = "BLOCKED"
 
 SAME_MINT_IN_FLIGHT = "SAME_MINT_IN_FLIGHT"
@@ -47,6 +51,9 @@ class LiveEntryScheduleResult:
         ]
         | None
     )
+    result: (
+        LiveEntryCandidatePipelineResult | None
+    ) = None
 
     def __post_init__(
         self,
@@ -61,6 +68,7 @@ class LiveEntryScheduleResult:
 
         if self.status not in (
             SCHEDULED,
+            RESOLVED,
             BLOCKED,
         ):
             raise ValueError(
@@ -89,6 +97,42 @@ class LiveEntryScheduleResult:
                     "SCHEDULED requires task"
                 )
 
+            if self.result is not None:
+                raise ValueError(
+                    "SCHEDULED cannot contain result"
+                )
+
+            return
+
+        if self.status == RESOLVED:
+            if self.reasons:
+                raise ValueError(
+                    "RESOLVED cannot contain "
+                    "scheduler reasons"
+                )
+
+            if self.task is not None:
+                raise ValueError(
+                    "RESOLVED cannot contain task"
+                )
+
+            if not isinstance(
+                self.result,
+                LiveEntryCandidatePipelineResult,
+            ):
+                raise ValueError(
+                    "RESOLVED requires pipeline result"
+                )
+
+            if self.result.stage not in (
+                ADAPTER,
+                POLICY,
+            ):
+                raise ValueError(
+                    "RESOLVED requires terminal "
+                    "pre-evidence stage"
+                )
+
             return
 
         if not self.reasons:
@@ -101,11 +145,22 @@ class LiveEntryScheduleResult:
                 "BLOCKED cannot contain task"
             )
 
+        if self.result is not None:
+            raise ValueError(
+                "BLOCKED cannot contain result"
+            )
+
     @property
     def scheduled(
         self,
     ) -> bool:
         return self.status == SCHEDULED
+
+    @property
+    def resolved(
+        self,
+    ) -> bool:
+        return self.status == RESOLVED
 
 
 class LiveEntryCandidateScheduler:
@@ -284,6 +339,21 @@ class LiveEntryCandidateScheduler:
             status=BLOCKED,
             reasons=(reason,),
             task=None,
+            result=None,
+        )
+
+    @staticmethod
+    def _resolved(
+        result: LiveEntryCandidatePipelineResult,
+    ) -> LiveEntryScheduleResult:
+        return LiveEntryScheduleResult(
+            result_version=(
+                LIVE_ENTRY_SCHEDULE_RESULT_VERSION
+            ),
+            status=RESOLVED,
+            reasons=(),
+            task=None,
+            result=result,
         )
 
     async def _run_candidate(
@@ -411,6 +481,53 @@ class LiveEntryCandidateScheduler:
                 "mint is invalid"
             )
 
+        #
+        # Snapshot provenance before any evaluation or task creation.
+        # Caller mutation after schedule() returns cannot alter either
+        # preflight or queued evidence work.
+        #
+        prediction_snapshot = dict(
+            prediction
+        )
+
+        #
+        # Canonical synchronous preflight.
+        #
+        # ADAPTER/POLICY terminal outcomes consume no same-mint
+        # ownership, pending capacity, semaphore slot, or evidence RPC.
+        #
+        preparation = (
+            prepare_live_entry_candidate_policy_once(
+                prediction=prediction_snapshot,
+                entry_signature=entry_signature,
+                mint=mint,
+                event_user=event_user,
+                quote_mint=quote_mint,
+                slot=slot,
+                trade_timestamp=trade_timestamp,
+                observed_at=observed_at,
+                signal_virtual_quote_reserves=(
+                    signal_virtual_quote_reserves
+                ),
+                signal_virtual_token_reserves=(
+                    signal_virtual_token_reserves
+                ),
+                policy=self._policy,
+                evaluated_at=int(
+                    time.time()
+                ),
+            )
+        )
+
+        if preparation.terminal_result is not None:
+            return self._resolved(
+                preparation.terminal_result
+            )
+
+        #
+        # Only a trusted policy PASS may consume bounded scheduler
+        # resources.
+        #
         if mint in self._inflight_mints:
             return self._blocked(
                 SAME_MINT_IN_FLIGHT
@@ -427,15 +544,6 @@ class LiveEntryCandidateScheduler:
             return self._blocked(
                 SCHEDULER_AT_CAPACITY
             )
-
-        #
-        # Snapshot the persisted prediction row before returning to the
-        # collector. Later mutation of the caller's dict cannot alter
-        # the queued candidate's provenance.
-        #
-        prediction_snapshot = dict(
-            prediction
-        )
 
         self._inflight_mints.add(
             mint
@@ -493,6 +601,7 @@ class LiveEntryCandidateScheduler:
             status=SCHEDULED,
             reasons=(),
             task=task,
+            result=None,
         )
 
     async def close(

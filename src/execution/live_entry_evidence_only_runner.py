@@ -61,7 +61,7 @@ def _components_are_compatible(
         LIVE_ENTRY_EVIDENCE_ONLY_BOOTSTRAP_VERSION
         == "live-entry-evidence-only-bootstrap-v1"
         and LIVE_ENTRY_CANDIDATE_SCHEDULER_VERSION
-        == "live-entry-candidate-scheduler-v1"
+        == "live-entry-candidate-scheduler-v2"
     )
 
 

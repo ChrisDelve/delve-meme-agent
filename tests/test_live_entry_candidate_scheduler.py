@@ -12,11 +12,16 @@ from src.execution.live_entry_candidate_scheduler import (
     BLOCKED,
     LIVE_ENTRY_CANDIDATE_SCHEDULER_VERSION,
     LIVE_ENTRY_SCHEDULE_RESULT_VERSION,
+    RESOLVED,
     SAME_MINT_IN_FLIGHT,
     SCHEDULED,
     SCHEDULER_AT_CAPACITY,
     SCHEDULER_CLOSED,
     LiveEntryCandidateScheduler,
+)
+from src.execution.model_entry_candidate import (
+    EXPECTED_ARTIFACT_VERSION,
+    EXPECTED_MODEL_SHADOW_VERSION,
 )
 from src.strategies.live_entry_policy import (
     LiveEntryPolicy,
@@ -35,6 +40,23 @@ class LiveEntryCandidateSchedulerTests(
         self.prediction = {
             "entry_signature":
                 "signature-1",
+            "mint": "mint-1",
+            "wallet": "wallet-1",
+            "quote_mint":
+                "11111111111111111111111111111111",
+            "slot": 123,
+            "trade_timestamp": 1_000,
+            "observed_at": 1_001,
+            "shadow_version": (
+                EXPECTED_MODEL_SHADOW_VERSION
+            ),
+            "artifact_version": (
+                EXPECTED_ARTIFACT_VERSION
+            ),
+            "artifact_sha256": "ab" * 32,
+            "model_eligible": True,
+            "probability_2x_15m": 0.42,
+            "predicted_at": 1_002,
         }
 
         self.event = {
@@ -79,25 +101,57 @@ class LiveEntryCandidateSchedulerTests(
             updates
         )
 
-        return scheduler.schedule(
-            prediction=(
-                dict(self.prediction)
-                if prediction is None
-                else prediction
-            ),
-            **event,
-        )
+        if prediction is None:
+            prediction = dict(
+                self.prediction
+            )
+
+            prediction.update(
+                {
+                    "entry_signature": (
+                        event["entry_signature"]
+                    ),
+                    "mint": event["mint"],
+                    "wallet": event["event_user"],
+                    "quote_mint": (
+                        event["quote_mint"]
+                    ),
+                    "slot": event["slot"],
+                    "trade_timestamp": (
+                        event["trade_timestamp"]
+                    ),
+                    "observed_at": (
+                        event["observed_at"]
+                    ),
+                }
+            )
+
+        #
+        # Fixed preflight clock for deterministic scheduler tests.
+        # Tests that need different worker timing patch time.time
+        # around this helper.
+        #
+        with patch(
+            "src.execution."
+            "live_entry_candidate_scheduler."
+            "time.time",
+            return_value=1_004,
+        ):
+            return scheduler.schedule(
+                prediction=prediction,
+                **event,
+            )
 
     async def test_version_is_locked(
         self,
     ):
         self.assertEqual(
             LIVE_ENTRY_CANDIDATE_SCHEDULER_VERSION,
-            "live-entry-candidate-scheduler-v1",
+            "live-entry-candidate-scheduler-v2",
         )
         self.assertEqual(
             LIVE_ENTRY_SCHEDULE_RESULT_VERSION,
-            "live-entry-schedule-result-v1",
+            "live-entry-schedule-result-v2",
         )
 
     async def test_policy_type_is_required(
@@ -164,6 +218,310 @@ class LiveEntryCandidateSchedulerTests(
                 max_concurrency=2,
                 max_pending_tasks=1,
             )
+
+    async def test_below_threshold_resolves_before_resource_ownership(
+        self,
+    ):
+        scheduler = self.scheduler(
+            max_concurrency=1,
+            max_pending_tasks=1,
+        )
+
+        prediction = dict(
+            self.prediction
+        )
+        prediction[
+            "probability_2x_15m"
+        ] = 0.39
+
+        resolved = self.schedule(
+            scheduler,
+            prediction=prediction,
+        )
+
+        self.assertEqual(
+            resolved.status,
+            RESOLVED,
+        )
+        self.assertTrue(
+            resolved.resolved
+        )
+        self.assertFalse(
+            resolved.scheduled
+        )
+        self.assertIsNone(
+            resolved.task
+        )
+        self.assertIsNotNone(
+            resolved.result
+        )
+        self.assertEqual(
+            resolved.result.status,
+            "REJECT",
+        )
+        self.assertEqual(
+            resolved.result.stage,
+            "POLICY",
+        )
+        self.assertEqual(
+            resolved.result.reasons,
+            (
+                "POLICY:"
+                "PROBABILITY_BELOW_THRESHOLD",
+            ),
+        )
+        self.assertEqual(
+            scheduler.active_task_count,
+            0,
+        )
+        self.assertEqual(
+            scheduler.inflight_mint_count,
+            0,
+        )
+
+        await scheduler.close()
+
+    async def test_policy_reject_is_not_masked_by_full_capacity(
+        self,
+    ):
+        scheduler = self.scheduler(
+            max_concurrency=1,
+            max_pending_tasks=1,
+        )
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def pipeline(
+            **kwargs,
+        ):
+            started.set()
+            await release.wait()
+            return "result"
+
+        with patch(
+            "src.execution."
+            "live_entry_candidate_scheduler."
+            "resolve_live_entry_candidate_evidence_once",
+            side_effect=pipeline,
+        ) as pipeline_mock:
+            first = self.schedule(
+                scheduler
+            )
+
+            await started.wait()
+
+            rejected_prediction = dict(
+                self.prediction
+            )
+            rejected_prediction.update(
+                {
+                    "entry_signature":
+                        "signature-2",
+                    "mint": "mint-2",
+                    "probability_2x_15m":
+                        0.39,
+                }
+            )
+
+            second = self.schedule(
+                scheduler,
+                prediction=rejected_prediction,
+                entry_signature="signature-2",
+                mint="mint-2",
+            )
+
+            self.assertEqual(
+                second.status,
+                RESOLVED,
+            )
+            self.assertEqual(
+                second.result.status,
+                "REJECT",
+            )
+            self.assertEqual(
+                second.result.stage,
+                "POLICY",
+            )
+            self.assertEqual(
+                second.result.reasons,
+                (
+                    "POLICY:"
+                    "PROBABILITY_BELOW_THRESHOLD",
+                ),
+            )
+            self.assertIsNone(
+                second.task
+            )
+
+            #
+            # The rejected candidate never entered the
+            # async evidence pipeline.
+            #
+            self.assertEqual(
+                pipeline_mock.await_count,
+                1,
+            )
+
+            #
+            # Only the original passing candidate owns
+            # scheduler resources.
+            #
+            self.assertEqual(
+                scheduler.active_task_count,
+                1,
+            )
+            self.assertEqual(
+                scheduler.inflight_mint_count,
+                1,
+            )
+
+            release.set()
+            await first.task
+
+        await scheduler.close()
+
+    async def test_policy_reject_is_not_masked_by_same_mint_inflight(
+        self,
+    ):
+        scheduler = self.scheduler(
+            max_concurrency=1,
+            max_pending_tasks=2,
+        )
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def pipeline(
+            **kwargs,
+        ):
+            started.set()
+            await release.wait()
+            return "result"
+
+        with patch(
+            "src.execution."
+            "live_entry_candidate_scheduler."
+            "resolve_live_entry_candidate_evidence_once",
+            side_effect=pipeline,
+        ) as pipeline_mock:
+            first = self.schedule(
+                scheduler
+            )
+
+            await started.wait()
+
+            rejected_prediction = dict(
+                self.prediction
+            )
+            rejected_prediction.update(
+                {
+                    "entry_signature":
+                        "signature-2",
+                    "probability_2x_15m":
+                        0.39,
+                }
+            )
+
+            second = self.schedule(
+                scheduler,
+                prediction=rejected_prediction,
+                entry_signature="signature-2",
+            )
+
+            self.assertEqual(
+                second.status,
+                RESOLVED,
+            )
+            self.assertEqual(
+                second.result.status,
+                "REJECT",
+            )
+            self.assertEqual(
+                second.result.stage,
+                "POLICY",
+            )
+            self.assertEqual(
+                second.result.reasons,
+                (
+                    "POLICY:"
+                    "PROBABILITY_BELOW_THRESHOLD",
+                ),
+            )
+            self.assertIsNone(
+                second.task
+            )
+
+            #
+            # Same-mint ownership cannot hide a terminal
+            # synchronous policy decision.
+            #
+            self.assertEqual(
+                pipeline_mock.await_count,
+                1,
+            )
+            self.assertEqual(
+                scheduler.active_task_count,
+                1,
+            )
+            self.assertEqual(
+                scheduler.inflight_mint_count,
+                1,
+            )
+
+            release.set()
+            await first.task
+
+        await scheduler.close()
+
+    async def test_resolved_candidate_does_not_consume_capacity(
+        self,
+    ):
+        scheduler = self.scheduler(
+            max_concurrency=1,
+            max_pending_tasks=1,
+        )
+
+        rejected_prediction = dict(
+            self.prediction
+        )
+        rejected_prediction[
+            "probability_2x_15m"
+        ] = 0.39
+
+        first = self.schedule(
+            scheduler,
+            prediction=rejected_prediction,
+        )
+
+        self.assertEqual(
+            first.status,
+            RESOLVED,
+        )
+
+        pipeline = AsyncMock(
+            return_value="result"
+        )
+
+        with patch(
+            "src.execution."
+            "live_entry_candidate_scheduler."
+            "resolve_live_entry_candidate_evidence_once",
+            pipeline,
+        ):
+            second = self.schedule(
+                scheduler,
+                entry_signature="signature-2",
+                mint="mint-2",
+            )
+
+            self.assertTrue(
+                second.scheduled
+            )
+
+            await second.task
+
+        await scheduler.close()
 
     async def test_schedule_runs_pipeline_and_returns_task(
         self,

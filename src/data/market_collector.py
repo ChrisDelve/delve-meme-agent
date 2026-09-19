@@ -385,6 +385,28 @@ def _prediction_is_exactly_eligible(
     )
 
 
+def _print_live_entry_candidate_result(
+    result,
+    *,
+    mint,
+):
+    reasons = (
+        ",".join(
+            result.reasons
+        )
+        if result.reasons
+        else "-"
+    )
+
+    print(
+        "🔎 LIVE ENTRY CANDIDATE | "
+        f"{mint[:8]}… | "
+        f"status={result.status} | "
+        f"stage={result.stage} | "
+        f"reasons={reasons}"
+    )
+
+
 def _observe_live_entry_candidate_task(
     task,
     *,
@@ -403,20 +425,9 @@ def _observe_live_entry_candidate_task(
         #
         return
 
-    reasons = (
-        ",".join(
-            result.reasons
-        )
-        if result.reasons
-        else "-"
-    )
-
-    print(
-        "🔎 LIVE ENTRY CANDIDATE | "
-        f"{mint[:8]}… | "
-        f"status={result.status} | "
-        f"stage={result.stage} | "
-        f"reasons={reasons}"
+    _print_live_entry_candidate_result(
+        result,
+        mint=mint,
     )
 
 
@@ -627,6 +638,12 @@ def process_buy_event(
                             mint=bound_mint,
                         )
                     )
+                )
+
+            elif live_schedule.resolved:
+                _print_live_entry_candidate_result(
+                    live_schedule.result,
+                    mint=trade_event["mint"],
                 )
 
             else:

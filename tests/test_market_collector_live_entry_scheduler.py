@@ -220,6 +220,53 @@ class MarketCollectorLiveEntrySchedulerTests(
             ),
         )
 
+    async def test_resolved_candidate_is_observed_without_task(
+        self,
+    ):
+        scheduler = Mock()
+
+        result = SimpleNamespace(
+            status="REJECT",
+            stage="POLICY",
+            reasons=(
+                "POLICY:"
+                "PROBABILITY_BELOW_THRESHOLD",
+            ),
+        )
+
+        scheduler.schedule.return_value = (
+            SimpleNamespace(
+                scheduled=False,
+                resolved=True,
+                reasons=(),
+                task=None,
+                result=result,
+            )
+        )
+
+        prediction = self.prediction(
+            eligible=1
+        )
+
+        with patch(
+            "builtins.print"
+        ) as printer:
+            self.process_with_prediction(
+                prediction=prediction,
+                scheduler=scheduler,
+            )
+
+        self.assertTrue(
+            any(
+                "status=REJECT"
+                in str(call)
+                and "stage=POLICY"
+                in str(call)
+                for call
+                in printer.call_args_list
+            )
+        )
+
     async def test_default_collector_path_passes_no_scheduler_to_listen(
         self,
     ):

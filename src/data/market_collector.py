@@ -59,6 +59,9 @@ from src.strategies.model_shadow_signals import (
 from src.execution.live_entry_candidate_scheduler import (
     LiveEntryCandidateScheduler,
 )
+from src.execution.live_entry_result_mailbox import (
+    LiveEntryResultMailbox,
+)
 
 load_dotenv()
 
@@ -411,6 +414,7 @@ def _observe_live_entry_candidate_task(
     task,
     *,
     mint,
+    result_mailbox=None,
 ):
     if task.cancelled():
         return
@@ -425,6 +429,11 @@ def _observe_live_entry_candidate_task(
         #
         return
 
+    if result_mailbox is not None:
+        result_mailbox.publish(
+            result
+        )
+
     _print_live_entry_candidate_result(
         result,
         mint=mint,
@@ -437,6 +446,7 @@ def process_buy_event(
     trade_event,
     *,
     live_entry_scheduler=None,
+    live_entry_result_mailbox=None,
 ):
     observed_at = int(time.time())
     result = save_buy(
@@ -632,10 +642,15 @@ def process_buy_event(
                 live_schedule.task.add_done_callback(
                     lambda task, bound_mint=(
                         trade_event["mint"]
+                    ), bound_result_mailbox=(
+                        live_entry_result_mailbox
                     ): (
                         _observe_live_entry_candidate_task(
                             task,
                             mint=bound_mint,
+                            result_mailbox=(
+                                bound_result_mailbox
+                            ),
                         )
                     )
                 )
@@ -692,6 +707,7 @@ def process_buy_event(
 async def listen(
     *,
     live_entry_scheduler=None,
+    live_entry_result_mailbox=None,
 ):
     init_db()
     invalidate_stale_intervals()
@@ -857,6 +873,9 @@ async def listen(
                                 live_entry_scheduler=(
                                     live_entry_scheduler
                                 ),
+                                live_entry_result_mailbox=(
+                                    live_entry_result_mailbox
+                                ),
                             )
 
                     #
@@ -906,6 +925,9 @@ async def run_market_collector(
     live_entry_scheduler: (
         LiveEntryCandidateScheduler | None
     ) = None,
+    live_entry_result_mailbox: (
+        LiveEntryResultMailbox | None
+    ) = None,
 ) -> None:
     """
     Run the market collector.
@@ -928,6 +950,28 @@ async def run_market_collector(
             "live_entry_scheduler must be "
             "LiveEntryCandidateScheduler"
         )
+
+    if (
+        live_entry_result_mailbox is not None
+        and not isinstance(
+            live_entry_result_mailbox,
+            LiveEntryResultMailbox,
+        )
+    ):
+        raise TypeError(
+            "live_entry_result_mailbox must be "
+            "LiveEntryResultMailbox"
+        )
+
+    if (
+        live_entry_result_mailbox is not None
+        and live_entry_scheduler is None
+    ):
+        raise ValueError(
+            "live_entry_result_mailbox requires "
+            "live_entry_scheduler"
+        )
+
     sweeper_task = None
 
     try:
@@ -972,7 +1016,10 @@ async def run_market_collector(
         await listen(
             live_entry_scheduler=(
                 live_entry_scheduler
-            )
+            ),
+            live_entry_result_mailbox=(
+                live_entry_result_mailbox
+            ),
         )
 
     finally:

@@ -19,6 +19,9 @@ from src.data import market_collector
 from src.execution.live_entry_candidate_scheduler import (
     LiveEntryCandidateScheduler,
 )
+from src.execution.live_entry_result_mailbox import (
+    LiveEntryResultMailbox,
+)
 from src.strategies.live_entry_policy import (
     LiveEntryPolicy,
 )
@@ -81,6 +84,7 @@ class MarketCollectorLiveEntrySchedulerTests(
         *,
         prediction,
         scheduler,
+        result_mailbox=None,
     ):
         with (
             patch.object(
@@ -117,6 +121,9 @@ class MarketCollectorLiveEntrySchedulerTests(
                 123,
                 self.trade_event(),
                 live_entry_scheduler=scheduler,
+                live_entry_result_mailbox=(
+                    result_mailbox
+                ),
             )
 
     async def test_ineligible_prediction_does_not_reach_live_scheduler(
@@ -220,6 +227,95 @@ class MarketCollectorLiveEntrySchedulerTests(
             ),
         )
 
+    async def test_scheduled_result_is_published_to_mailbox(
+        self,
+    ):
+        scheduler = Mock()
+        result_mailbox = Mock()
+
+        result = SimpleNamespace(
+            status="PASS",
+            stage="EVIDENCE",
+            reasons=(),
+            evidence_ready=True,
+        )
+
+        async def finished():
+            return result
+
+        task = asyncio.create_task(
+            finished()
+        )
+
+        scheduler.schedule.return_value = (
+            SimpleNamespace(
+                scheduled=True,
+                reasons=(),
+                task=task,
+            )
+        )
+
+        with patch(
+            "builtins.print"
+        ):
+            self.process_with_prediction(
+                prediction=self.prediction(
+                    eligible=1
+                ),
+                scheduler=scheduler,
+                result_mailbox=(
+                    result_mailbox
+                ),
+            )
+
+            await task
+            await asyncio.sleep(0)
+
+        result_mailbox.publish.assert_called_once_with(
+            result
+        )
+
+    async def test_resolved_preflight_result_is_not_published_to_mailbox(
+        self,
+    ):
+        scheduler = Mock()
+        result_mailbox = Mock()
+
+        result = SimpleNamespace(
+            status="REJECT",
+            stage="POLICY",
+            reasons=(
+                "POLICY:"
+                "PROBABILITY_BELOW_THRESHOLD",
+            ),
+            evidence_ready=False,
+        )
+
+        scheduler.schedule.return_value = (
+            SimpleNamespace(
+                scheduled=False,
+                resolved=True,
+                reasons=(),
+                task=None,
+                result=result,
+            )
+        )
+
+        with patch(
+            "builtins.print"
+        ):
+            self.process_with_prediction(
+                prediction=self.prediction(
+                    eligible=1
+                ),
+                scheduler=scheduler,
+                result_mailbox=(
+                    result_mailbox
+                ),
+            )
+
+        result_mailbox.publish.assert_not_called()
+
     async def test_resolved_candidate_is_observed_without_task(
         self,
     ):
@@ -314,7 +410,8 @@ class MarketCollectorLiveEntrySchedulerTests(
             )
 
         listen_mock.assert_awaited_once_with(
-            live_entry_scheduler=None
+            live_entry_scheduler=None,
+            live_entry_result_mailbox=None,
         )
 
     async def test_supplied_scheduler_is_closed_by_collector(
@@ -345,10 +442,15 @@ class MarketCollectorLiveEntrySchedulerTests(
         async def listen_stub(
             *,
             live_entry_scheduler=None,
+            live_entry_result_mailbox=None,
         ):
             self.assertIs(
                 live_entry_scheduler,
                 scheduler,
+            )
+
+            self.assertIsNone(
+                live_entry_result_mailbox
             )
 
         with (
@@ -438,6 +540,149 @@ class MarketCollectorLiveEntrySchedulerTests(
             scheduler.closed
         )
         sweeper.assert_not_called()
+
+    async def test_supplied_mailbox_is_forwarded_to_listen(
+        self,
+    ):
+        policy = LiveEntryPolicy(
+            min_probability_2x_15m=0.40,
+            max_candidate_age_seconds=5,
+        )
+
+        scheduler = LiveEntryCandidateScheduler(
+            policy=policy,
+            max_concurrency=1,
+            max_pending_tasks=1,
+        )
+
+        result_mailbox = LiveEntryResultMailbox(
+            max_pending_results=1
+        )
+
+        shadow_account = SimpleNamespace(
+            current_equity_lamports=1,
+            cash_balance_lamports=1,
+            open_positions=0,
+        )
+
+        async def sweeper():
+            await asyncio.Event().wait()
+
+        async def listen_stub(
+            *,
+            live_entry_scheduler=None,
+            live_entry_result_mailbox=None,
+        ):
+            self.assertIs(
+                live_entry_scheduler,
+                scheduler,
+            )
+
+            self.assertIs(
+                live_entry_result_mailbox,
+                result_mailbox,
+            )
+
+        with (
+            patch.object(
+                market_collector,
+                "initialize_shadow_account",
+                return_value=shadow_account,
+            ),
+            patch.object(
+                market_collector,
+                "initialize_shadow_position_manager",
+                return_value=set(),
+            ),
+            patch.object(
+                market_collector,
+                "run_shadow_position_sweeper",
+                side_effect=sweeper,
+            ),
+            patch.object(
+                market_collector,
+                "listen",
+                side_effect=listen_stub,
+            ),
+            patch(
+                "builtins.print"
+            ),
+        ):
+            await (
+                market_collector
+                .run_market_collector(
+                    live_entry_scheduler=(
+                        scheduler
+                    ),
+                    live_entry_result_mailbox=(
+                        result_mailbox
+                    ),
+                )
+            )
+
+        self.assertTrue(
+            scheduler.closed
+        )
+
+        self.assertFalse(
+            result_mailbox.failed
+        )
+
+    async def test_invalid_mailbox_type_fails_before_collector_startup(
+        self,
+    ):
+        policy = LiveEntryPolicy(
+            min_probability_2x_15m=0.40,
+            max_candidate_age_seconds=5,
+        )
+
+        scheduler = LiveEntryCandidateScheduler(
+            policy=policy,
+            max_concurrency=1,
+            max_pending_tasks=1,
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            (
+                "^live_entry_result_mailbox must be "
+                "LiveEntryResultMailbox$"
+            ),
+        ):
+            await (
+                market_collector
+                .run_market_collector(
+                    live_entry_scheduler=(
+                        scheduler
+                    ),
+                    live_entry_result_mailbox=object(),
+                )
+            )
+
+        await scheduler.close()
+
+    async def test_mailbox_requires_scheduler_before_collector_startup(
+        self,
+    ):
+        result_mailbox = LiveEntryResultMailbox(
+            max_pending_results=1
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            (
+                "^live_entry_result_mailbox requires "
+                "live_entry_scheduler$"
+            ),
+        ):
+            await (
+                market_collector
+                .run_market_collector(
+                    live_entry_result_mailbox=(
+                        result_mailbox
+                    )
+                )
+            )
 
     async def test_invalid_scheduler_type_fails_before_collector_startup(
         self,

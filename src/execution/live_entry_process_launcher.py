@@ -34,7 +34,7 @@ from src.execution.live_startup_preflight import (
 
 
 LIVE_ENTRY_PROCESS_LAUNCHER_VERSION = (
-    "live-entry-process-launcher-v3"
+    "live-entry-process-launcher-v4"
 )
 
 LIVE_ENTRY_PROCESS_LAUNCHER_COMPONENT_VERSION_MISMATCH = (
@@ -62,7 +62,7 @@ def _components_are_compatible(
         and LIVE_STARTUP_PREFLIGHT_VERSION
         == "live-startup-preflight-v2"
         and LIVE_ENTRY_PROCESS_RUNNER_VERSION
-        == "live-entry-process-runner-v2"
+        == "live-entry-process-runner-v3"
         and LIVE_PROCESS_RUNNER_VERSION
         == "live-process-runner-v1"
     )
@@ -81,15 +81,19 @@ async def run_bootstrapped_live_entry_process(
 
         install SIGINT/SIGTERM handlers
                     ↓
-        load four explicit non-secret configs
+        load operating config only
                     ↓
         yield once for any pending shutdown signal
                     ↓
-        if still active: startup preflight
+        if still active: DB-only startup preflight
                     ↓
         run_live_entry_process(...)
                     ↓
-        recovery + BUY + SELL under one LiveProcessOwner
+        ONE LiveProcessOwner + recovery
+                    ↓
+        lazy evidence / BUY / SELL config
+                    ↓
+        collector + BUY + SELL fresh authority
                     ↓
         remove signal handlers
 
@@ -116,23 +120,24 @@ async def run_bootstrapped_live_entry_process(
             )
         )
 
-        evidence_config = (
-            bootstrap_live_entry_evidence_only_config(
-                dotenv_path=dotenv_path
+        #
+        # Fresh-capital configuration is deliberately lazy.
+        #
+        # The unified runner owns the ONE LiveProcessOwner and starts
+        # recovery before invoking this loader.
+        #
+        def fresh_config_loader():
+            return (
+                bootstrap_live_entry_evidence_only_config(
+                    dotenv_path=dotenv_path
+                ),
+                bootstrap_live_buy_execution_config(
+                    dotenv_path=dotenv_path
+                ),
+                bootstrap_live_sell_supervisor_config(
+                    dotenv_path=dotenv_path
+                ),
             )
-        )
-
-        execution_config = (
-            bootstrap_live_buy_execution_config(
-                dotenv_path=dotenv_path
-            )
-        )
-
-        sell_supervisor_config = (
-            bootstrap_live_sell_supervisor_config(
-                dotenv_path=dotenv_path
-            )
-        )
 
         #
         # add_signal_handler() schedules its callback on the event
@@ -161,11 +166,7 @@ async def run_bootstrapped_live_entry_process(
 
         await run_live_entry_process(
             operating_config=operating_config,
-            evidence_config=evidence_config,
-            execution_config=execution_config,
-            sell_supervisor_config=(
-                sell_supervisor_config
-            ),
+            fresh_config_loader=fresh_config_loader,
             shutdown_event=shutdown_event,
         )
 

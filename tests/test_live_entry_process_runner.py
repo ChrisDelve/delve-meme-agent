@@ -186,7 +186,7 @@ class LiveEntryProcessRunnerTests(
     ):
         self.assertEqual(
             LIVE_ENTRY_PROCESS_RUNNER_VERSION,
-            "live-entry-process-runner-v2",
+            "live-entry-process-runner-v3",
         )
 
     async def test_preexisting_shutdown_acquires_no_process_authority(
@@ -608,11 +608,6 @@ class LiveEntryProcessRunnerTests(
     async def test_recovery_exception_propagates_and_closes_owner(
         self,
     ):
-        scheduler = self.scheduler()
-        mailbox = Mock()
-        mailbox.wait_failed = AsyncMock(
-            side_effect=self.forever
-        )
         owner = Mock()
 
         owner.run_recovery_service = AsyncMock(
@@ -620,52 +615,30 @@ class LiveEntryProcessRunnerTests(
                 "recovery boom"
             )
         )
+
         owner.close = Mock()
 
-        async def collector_stub(
-            *,
-            scheduler,
-            mailbox,
-        ):
-            await asyncio.Event().wait()
+        owner_constructor = Mock(
+            return_value=owner
+        )
 
-        async def consumer_stub(
-            *,
-            owner,
-            mailbox,
-            execution_config,
-            stop_event,
-        ):
-            await stop_event.wait()
+        scheduler_constructor = Mock()
+        mailbox_constructor = Mock()
 
         with (
             patch(
+                f"{MODULE}.LiveProcessOwner",
+                new=owner_constructor,
+            ),
+            patch(
                 f"{MODULE}."
                 "LiveEntryCandidateScheduler",
-                return_value=scheduler,
+                new=scheduler_constructor,
             ),
             patch(
                 f"{MODULE}."
                 "LiveEntryResultMailbox",
-                return_value=mailbox,
-            ),
-            patch(
-                f"{MODULE}.LiveProcessOwner",
-                return_value=owner,
-            ),
-            patch(
-                f"{MODULE}."
-                "_run_market_collector_with_live_entry",
-                new=AsyncMock(
-                    side_effect=collector_stub
-                ),
-            ),
-            patch(
-                f"{MODULE}."
-                "_run_live_entry_capital_consumer",
-                new=AsyncMock(
-                    side_effect=consumer_stub
-                ),
+                new=mailbox_constructor,
             ),
         ):
             with self.assertRaisesRegex(
@@ -690,9 +663,16 @@ class LiveEntryProcessRunnerTests(
                     ),
                 )
 
-        self.assertTrue(
-            scheduler.closed
+        owner_constructor.assert_called_once_with(
+            config=self.operating_config()
         )
+
+        #
+        # Recovery failed during the startup barrier.
+        # Fresh-capital machinery must never have existed.
+        #
+        scheduler_constructor.assert_not_called()
+        mailbox_constructor.assert_not_called()
 
         owner.close.assert_called_once_with()
 
@@ -1550,6 +1530,200 @@ class LiveEntryProcessRunnerTests(
         )
 
         owner.close.assert_called_once_with()
+
+
+    async def test_fresh_config_loader_runs_after_recovery_handoff(
+        self,
+    ):
+        events = []
+
+        shutdown_event = asyncio.Event()
+        recovery_entered = asyncio.Event()
+
+        owner = Mock()
+
+        async def recovery():
+            events.append(
+                "recovery"
+            )
+
+            recovery_entered.set()
+
+            await asyncio.Event().wait()
+
+        owner.run_recovery_service = AsyncMock(
+            side_effect=recovery
+        )
+
+        owner.close = Mock()
+
+        owner_constructor = Mock(
+            return_value=owner
+        )
+
+        scheduler_constructor = Mock()
+
+        def fresh_config_loader():
+            self.assertTrue(
+                recovery_entered.is_set()
+            )
+
+            events.append(
+                "fresh-config"
+            )
+
+            #
+            # Stop before any fresh-capital machinery is constructed.
+            #
+            shutdown_event.set()
+
+            return (
+                self.evidence_config(),
+                self.execution_config(),
+                self.sell_config(),
+            )
+
+        with (
+            patch(
+                f"{MODULE}.LiveProcessOwner",
+                new=owner_constructor,
+            ),
+            patch(
+                f"{MODULE}."
+                "LiveEntryCandidateScheduler",
+                new=scheduler_constructor,
+            ),
+        ):
+            await run_live_entry_process(
+                operating_config=(
+                    self.operating_config()
+                ),
+                fresh_config_loader=(
+                    fresh_config_loader
+                ),
+                shutdown_event=shutdown_event,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "recovery",
+                "fresh-config",
+            ],
+        )
+
+        scheduler_constructor.assert_not_called()
+
+        owner_constructor.assert_called_once()
+
+        owner.close.assert_called_once_with()
+
+    async def test_fresh_config_failure_occurs_after_recovery_handoff(
+        self,
+    ):
+        events = []
+
+        recovery_entered = asyncio.Event()
+
+        owner = Mock()
+
+        async def recovery():
+            events.append(
+                "recovery"
+            )
+
+            recovery_entered.set()
+
+            await asyncio.Event().wait()
+
+        owner.run_recovery_service = AsyncMock(
+            side_effect=recovery
+        )
+
+        owner.close = Mock()
+
+        owner_constructor = Mock(
+            return_value=owner
+        )
+
+        scheduler_constructor = Mock()
+
+        def fresh_config_loader():
+            self.assertTrue(
+                recovery_entered.is_set()
+            )
+
+            events.append(
+                "fresh-config"
+            )
+
+            raise RuntimeError(
+                "fresh bootstrap boom"
+            )
+
+        with (
+            patch(
+                f"{MODULE}.LiveProcessOwner",
+                new=owner_constructor,
+            ),
+            patch(
+                f"{MODULE}."
+                "LiveEntryCandidateScheduler",
+                new=scheduler_constructor,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^fresh bootstrap boom$",
+            ):
+                await run_live_entry_process(
+                    operating_config=(
+                        self.operating_config()
+                    ),
+                    fresh_config_loader=(
+                        fresh_config_loader
+                    ),
+                    shutdown_event=asyncio.Event(),
+                )
+
+        self.assertEqual(
+            events,
+            [
+                "recovery",
+                "fresh-config",
+            ],
+        )
+
+        scheduler_constructor.assert_not_called()
+
+        owner.close.assert_called_once_with()
+
+    async def test_preexisting_shutdown_never_invokes_fresh_config_loader(
+        self,
+    ):
+        shutdown_event = asyncio.Event()
+        shutdown_event.set()
+
+        fresh_config_loader = Mock()
+
+        owner_constructor = Mock()
+
+        with patch(
+            f"{MODULE}.LiveProcessOwner",
+            new=owner_constructor,
+        ):
+            await run_live_entry_process(
+                operating_config=(
+                    self.operating_config()
+                ),
+                fresh_config_loader=(
+                    fresh_config_loader
+                ),
+                shutdown_event=shutdown_event,
+            )
+
+        fresh_config_loader.assert_not_called()
+        owner_constructor.assert_not_called()
 
 
 if __name__ == "__main__":

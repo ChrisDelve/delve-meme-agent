@@ -51,7 +51,7 @@ class LiveEntryProcessLauncherTests(
     ):
         self.assertEqual(
             LIVE_ENTRY_PROCESS_LAUNCHER_VERSION,
-            "live-entry-process-launcher-v3",
+            "live-entry-process-launcher-v4",
         )
 
     async def test_component_mismatch_fails_before_signal_or_bootstrap(
@@ -119,6 +119,7 @@ class LiveEntryProcessLauncherTests(
         execution.assert_not_called()
         sell.assert_not_called()
         lifecycle.assert_not_awaited()
+        self.preflight.assert_not_awaited()
 
     async def test_exact_bootstrap_composition_and_handler_cleanup(
         self,
@@ -153,12 +154,41 @@ class LiveEntryProcessLauncherTests(
             return_value=sell_config
         )
 
-        lifecycle = AsyncMock(
-            return_value=None
-        )
-
         dotenv_path = Path(
             "/tmp/delve-production.env"
+        )
+
+        captured = {}
+
+        async def lifecycle(
+            *,
+            operating_config,
+            fresh_config_loader,
+            shutdown_event,
+        ):
+            captured["operating"] = (
+                operating_config
+            )
+            captured["loader"] = (
+                fresh_config_loader
+            )
+            captured["shutdown"] = (
+                shutdown_event
+            )
+
+            loaded = fresh_config_loader()
+
+            self.assertEqual(
+                loaded,
+                (
+                    evidence_config,
+                    execution_config,
+                    sell_config,
+                ),
+            )
+
+        lifecycle_mock = AsyncMock(
+            side_effect=lifecycle
         )
 
         with (
@@ -190,7 +220,7 @@ class LiveEntryProcessLauncherTests(
             patch(
                 f"{MODULE}."
                 "run_live_entry_process",
-                new=lifecycle,
+                new=lifecycle_mock,
             ),
         ):
             await (
@@ -199,22 +229,10 @@ class LiveEntryProcessLauncherTests(
                 )
             )
 
-        install.assert_called_once()
-
-        shutdown_event = (
-            install.call_args.kwargs[
-                "shutdown_event"
-            ]
-        )
-
-        self.assertIsInstance(
-            shutdown_event,
-            asyncio.Event,
-        )
-
         operating.assert_called_once_with(
             dotenv_path=dotenv_path
         )
+
         evidence.assert_called_once_with(
             dotenv_path=dotenv_path
         )
@@ -225,23 +243,31 @@ class LiveEntryProcessLauncherTests(
             dotenv_path=dotenv_path
         )
 
-        lifecycle.assert_awaited_once_with(
-            operating_config=operating_config,
-            evidence_config=evidence_config,
-            execution_config=execution_config,
-            sell_supervisor_config=sell_config,
-            shutdown_event=shutdown_event,
+        self.preflight.assert_awaited_once_with(
+            operating_config=operating_config
+        )
+
+        lifecycle_mock.assert_awaited_once()
+
+        self.assertIs(
+            captured["operating"],
+            operating_config,
+        )
+        self.assertIsInstance(
+            captured["shutdown"],
+            asyncio.Event,
+        )
+        self.assertTrue(
+            callable(
+                captured["loader"]
+            )
         )
 
         self.assertEqual(
             loop.remove_signal_handler.call_args_list,
             [
-                call(
-                    signal.SIGINT
-                ),
-                call(
-                    signal.SIGTERM
-                ),
+                call(signal.SIGINT),
+                call(signal.SIGTERM),
             ],
         )
 
@@ -251,50 +277,89 @@ class LiveEntryProcessLauncherTests(
         loop = Mock()
         events = []
 
+        operating_config = object()
+        evidence_config = object()
+        execution_config = object()
+        sell_config = object()
+
         def operating(
             *,
             dotenv_path,
         ):
+            del dotenv_path
             events.append(
                 "operating"
             )
-            return object()
+            return operating_config
 
         def evidence(
             *,
             dotenv_path,
         ):
+            del dotenv_path
             events.append(
                 "evidence"
             )
-            return object()
+            return evidence_config
 
         def execution(
             *,
             dotenv_path,
         ):
+            del dotenv_path
             events.append(
                 "execution"
             )
-            return object()
+            return execution_config
 
         def sell(
             *,
             dotenv_path,
         ):
+            del dotenv_path
             events.append(
                 "sell"
             )
-            return object()
+            return sell_config
+
+        async def preflight(
+            *,
+            operating_config,
+        ):
+            del operating_config
+            events.append(
+                "preflight"
+            )
 
         async def lifecycle(
-            **kwargs,
+            *,
+            operating_config,
+            fresh_config_loader,
+            shutdown_event,
         ):
-            del kwargs
+            del (
+                operating_config,
+                shutdown_event,
+            )
 
             events.append(
                 "lifecycle"
             )
+
+            loaded = fresh_config_loader()
+
+            self.assertEqual(
+                loaded,
+                (
+                    evidence_config,
+                    execution_config,
+                    sell_config,
+                ),
+            )
+
+        self.preflight.side_effect = (
+            preflight
+        )
 
         with (
             patch(
@@ -343,10 +408,11 @@ class LiveEntryProcessLauncherTests(
             events,
             [
                 "operating",
+                "preflight",
+                "lifecycle",
                 "evidence",
                 "execution",
                 "sell",
-                "lifecycle",
             ],
         )
 
@@ -355,6 +421,10 @@ class LiveEntryProcessLauncherTests(
     ):
         loop = asyncio.get_running_loop()
         captured = {}
+
+        evidence = Mock()
+        execution = Mock()
+        sell = Mock()
 
         def install(
             *,
@@ -386,16 +456,12 @@ class LiveEntryProcessLauncherTests(
         async def lifecycle(
             *,
             operating_config,
-            evidence_config,
-            execution_config,
-            sell_supervisor_config,
+            fresh_config_loader,
             shutdown_event,
         ):
             del (
                 operating_config,
-                evidence_config,
-                execution_config,
-                sell_supervisor_config,
+                fresh_config_loader,
             )
 
             self.assertTrue(
@@ -420,17 +486,17 @@ class LiveEntryProcessLauncherTests(
             patch(
                 f"{MODULE}."
                 "bootstrap_live_entry_evidence_only_config",
-                return_value=object(),
+                new=evidence,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_buy_execution_config",
-                return_value=object(),
+                new=execution,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_sell_supervisor_config",
-                return_value=object(),
+                new=sell,
             ),
             patch(
                 f"{MODULE}."
@@ -442,9 +508,15 @@ class LiveEntryProcessLauncherTests(
                 run_bootstrapped_live_entry_process()
             )
 
+        self.preflight.assert_not_awaited()
+
+        evidence.assert_not_called()
+        execution.assert_not_called()
+        sell.assert_not_called()
+
         lifecycle_mock.assert_awaited_once()
 
-    async def test_bootstrap_failure_removes_handlers_and_stops_composition(
+    async def test_operating_bootstrap_failure_removes_handlers_and_stops_composition(
         self,
     ):
         loop = Mock()
@@ -470,7 +542,7 @@ class LiveEntryProcessLauncherTests(
                 f"{MODULE}."
                 "bootstrap_live_operating_config",
                 side_effect=RuntimeError(
-                    "bad operating config"
+                    "bootstrap failed"
                 ),
             ),
             patch(
@@ -496,12 +568,13 @@ class LiveEntryProcessLauncherTests(
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "^bad operating config$",
+                "^bootstrap failed$",
             ):
                 await (
                     run_bootstrapped_live_entry_process()
                 )
 
+        self.preflight.assert_not_awaited()
         evidence.assert_not_called()
         execution.assert_not_called()
         sell.assert_not_called()
@@ -510,12 +583,8 @@ class LiveEntryProcessLauncherTests(
         self.assertEqual(
             loop.remove_signal_handler.call_args_list,
             [
-                call(
-                    signal.SIGINT
-                ),
-                call(
-                    signal.SIGTERM
-                ),
+                call(signal.SIGINT),
+                call(signal.SIGTERM),
             ],
         )
 
@@ -523,6 +592,17 @@ class LiveEntryProcessLauncherTests(
         self,
     ):
         loop = Mock()
+        operating_config = object()
+
+        evidence = Mock()
+        execution = Mock()
+        sell = Mock()
+
+        lifecycle = AsyncMock(
+            side_effect=RuntimeError(
+                "lifecycle failed"
+            )
+        )
 
         with (
             patch(
@@ -539,50 +619,53 @@ class LiveEntryProcessLauncherTests(
             patch(
                 f"{MODULE}."
                 "bootstrap_live_operating_config",
-                return_value=object(),
+                return_value=operating_config,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_entry_evidence_only_config",
-                return_value=object(),
+                new=evidence,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_buy_execution_config",
-                return_value=object(),
+                new=execution,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_sell_supervisor_config",
-                return_value=object(),
+                new=sell,
             ),
             patch(
                 f"{MODULE}."
                 "run_live_entry_process",
-                new=AsyncMock(
-                    side_effect=RuntimeError(
-                        "live process failed"
-                    )
-                ),
+                new=lifecycle,
             ),
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "^live process failed$",
+                "^lifecycle failed$",
             ):
                 await (
                     run_bootstrapped_live_entry_process()
                 )
 
+        self.preflight.assert_awaited_once_with(
+            operating_config=operating_config
+        )
+
+        #
+        # Lifecycle failed before invoking the lazy loader.
+        #
+        evidence.assert_not_called()
+        execution.assert_not_called()
+        sell.assert_not_called()
+
         self.assertEqual(
             loop.remove_signal_handler.call_args_list,
             [
-                call(
-                    signal.SIGINT
-                ),
-                call(
-                    signal.SIGTERM
-                ),
+                call(signal.SIGINT),
+                call(signal.SIGTERM),
             ],
         )
 
@@ -642,56 +725,63 @@ class LiveEntryProcessLauncherTests(
         execution.assert_not_called()
         sell.assert_not_called()
         lifecycle.assert_not_awaited()
+        self.preflight.assert_not_awaited()
 
-
-    async def test_preflight_runs_before_lifecycle_with_exact_configs(
+    async def test_preflight_runs_before_lifecycle_and_fresh_config(
         self,
     ):
         events = []
-
         loop = Mock()
 
         operating_config = object()
-        evidence_config = object()
-        execution_config = object()
-        sell_config = object()
+
+        evidence = Mock(
+            side_effect=lambda **kwargs: (
+                events.append("evidence"),
+                object(),
+            )[1]
+        )
+        execution = Mock(
+            side_effect=lambda **kwargs: (
+                events.append("execution"),
+                object(),
+            )[1]
+        )
+        sell = Mock(
+            side_effect=lambda **kwargs: (
+                events.append("sell"),
+                object(),
+            )[1]
+        )
 
         async def preflight(
-
             *,
-
             operating_config,
-
         ):
+            del operating_config
             events.append(
                 "preflight"
             )
 
-            return object()
-
         async def lifecycle(
             *,
             operating_config,
-            evidence_config,
-            execution_config,
-            sell_supervisor_config,
+            fresh_config_loader,
             shutdown_event,
         ):
+            del (
+                operating_config,
+                shutdown_event,
+            )
+
             events.append(
                 "lifecycle"
             )
 
-            self.assertIsInstance(
-                shutdown_event,
-                asyncio.Event,
-            )
+            fresh_config_loader()
 
         self.preflight.side_effect = (
             preflight
-        )
-
-        lifecycle_mock = AsyncMock(
-            side_effect=lifecycle
         )
 
         with (
@@ -711,22 +801,24 @@ class LiveEntryProcessLauncherTests(
             patch(
                 f"{MODULE}."
                 "bootstrap_live_entry_evidence_only_config",
-                return_value=evidence_config,
+                new=evidence,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_buy_execution_config",
-                return_value=execution_config,
+                new=execution,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_sell_supervisor_config",
-                return_value=sell_config,
+                new=sell,
             ),
             patch(
                 f"{MODULE}."
                 "run_live_entry_process",
-                new=lifecycle_mock,
+                new=AsyncMock(
+                    side_effect=lifecycle
+                ),
             ),
         ):
             await (
@@ -738,25 +830,23 @@ class LiveEntryProcessLauncherTests(
             [
                 "preflight",
                 "lifecycle",
+                "evidence",
+                "execution",
+                "sell",
             ],
         )
 
-        self.preflight.assert_awaited_once_with(
-            operating_config=operating_config,
-        )
-
-        lifecycle_mock.assert_awaited_once()
-
-    async def test_pending_shutdown_skips_preflight(
+    async def test_pending_shutdown_skips_preflight_and_fresh_config(
         self,
     ):
         loop = asyncio.get_running_loop()
         captured = {}
 
         operating_config = object()
-        evidence_config = object()
-        execution_config = object()
-        sell_config = object()
+
+        evidence = Mock()
+        execution = Mock()
+        sell = Mock()
 
         def install(
             *,
@@ -775,6 +865,8 @@ class LiveEntryProcessLauncherTests(
             *,
             dotenv_path,
         ):
+            del dotenv_path
+
             loop.call_soon(
                 captured[
                     "shutdown_event"
@@ -786,11 +878,14 @@ class LiveEntryProcessLauncherTests(
         async def lifecycle(
             *,
             operating_config,
-            evidence_config,
-            execution_config,
-            sell_supervisor_config,
+            fresh_config_loader,
             shutdown_event,
         ):
+            del (
+                operating_config,
+                fresh_config_loader,
+            )
+
             self.assertTrue(
                 shutdown_event.is_set()
             )
@@ -813,17 +908,17 @@ class LiveEntryProcessLauncherTests(
             patch(
                 f"{MODULE}."
                 "bootstrap_live_entry_evidence_only_config",
-                return_value=evidence_config,
+                new=evidence,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_buy_execution_config",
-                return_value=execution_config,
+                new=execution,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_sell_supervisor_config",
-                return_value=sell_config,
+                new=sell,
             ),
             patch(
                 f"{MODULE}."
@@ -836,18 +931,22 @@ class LiveEntryProcessLauncherTests(
             )
 
         self.preflight.assert_not_awaited()
+
+        evidence.assert_not_called()
+        execution.assert_not_called()
+        sell.assert_not_called()
+
         lifecycle_mock.assert_awaited_once()
 
-    async def test_preflight_failure_prevents_lifecycle_and_removes_handlers(
+    async def test_preflight_failure_prevents_lifecycle_and_fresh_config(
         self,
     ):
         loop = Mock()
-
         operating_config = object()
-        evidence_config = object()
-        execution_config = object()
-        sell_config = object()
 
+        evidence = Mock()
+        execution = Mock()
+        sell = Mock()
         lifecycle = AsyncMock()
 
         self.preflight.side_effect = (
@@ -876,17 +975,17 @@ class LiveEntryProcessLauncherTests(
             patch(
                 f"{MODULE}."
                 "bootstrap_live_entry_evidence_only_config",
-                return_value=evidence_config,
+                new=evidence,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_buy_execution_config",
-                return_value=execution_config,
+                new=execution,
             ),
             patch(
                 f"{MODULE}."
                 "bootstrap_live_sell_supervisor_config",
-                return_value=sell_config,
+                new=sell,
             ),
             patch(
                 f"{MODULE}."
@@ -903,22 +1002,22 @@ class LiveEntryProcessLauncherTests(
                 )
 
         self.preflight.assert_awaited_once_with(
-            operating_config=operating_config,
+            operating_config=operating_config
         )
 
+        evidence.assert_not_called()
+        execution.assert_not_called()
+        sell.assert_not_called()
         lifecycle.assert_not_awaited()
 
         self.assertEqual(
             loop.remove_signal_handler.call_args_list,
             [
-                call(
-                    signal.SIGINT
-                ),
-                call(
-                    signal.SIGTERM
-                ),
+                call(signal.SIGINT),
+                call(signal.SIGTERM),
             ],
         )
+
 
 if __name__ == "__main__":
     unittest.main()

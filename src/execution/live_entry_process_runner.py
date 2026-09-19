@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Callable
 
 from src.execution.live_buy_execution_config import (
     LIVE_BUY_EXECUTION_CONFIG_VERSION,
@@ -42,7 +42,7 @@ from src.execution.live_sell_supervisor_service import (
 
 
 LIVE_ENTRY_PROCESS_RUNNER_VERSION = (
-    "live-entry-process-runner-v2"
+    "live-entry-process-runner-v3"
 )
 
 LIVE_ENTRY_PROCESS_RECOVERY_STOPPED = (
@@ -312,12 +312,24 @@ async def _run_live_entry_capital_consumer(
             )
 
 
+
+LiveFreshConfigLoader = Callable[
+    [],
+    tuple[
+        LiveEntryEvidenceOnlyConfig,
+        LiveBuyExecutionConfig,
+        LiveSellSupervisorConfig,
+    ],
+]
+
+
 async def run_live_entry_process(
     *,
     operating_config: LiveOperatingConfig,
-    evidence_config: LiveEntryEvidenceOnlyConfig,
-    execution_config: LiveBuyExecutionConfig,
-    sell_supervisor_config: LiveSellSupervisorConfig,
+    evidence_config: LiveEntryEvidenceOnlyConfig | None = None,
+    execution_config: LiveBuyExecutionConfig | None = None,
+    sell_supervisor_config: LiveSellSupervisorConfig | None = None,
+    fresh_config_loader: LiveFreshConfigLoader | None = None,
     shutdown_event: asyncio.Event,
 ) -> None:
     """
@@ -325,13 +337,17 @@ async def run_live_entry_process(
 
     Authority ordering:
 
-        explicit validated configs
-            ↓
-        bounded scheduler + passive mailbox
+        validated operating config
             ↓
         one LiveProcessOwner / host-global lease
             ↓
-        recovery + collector + serial BUY consumer
+        recovery receives event-loop handoff
+            ↓
+        resolve + validate fresh-capital configs
+            ↓
+        bounded scheduler + passive mailbox
+            ↓
+        collector + serial BUY consumer
                  + continuous SELL supervisor
             ↓
         shutdown OR child failure OR mailbox failure
@@ -347,6 +363,13 @@ async def run_live_entry_process(
         owner.close()
             ↓
         process authority lease released
+
+    Production may supply fresh_config_loader so evidence / BUY / SELL
+    bootstrap cannot prevent recovery from becoming reachable first.
+
+    Direct callers may continue supplying the three already-built config
+    objects. Those objects are validated only after recovery receives its
+    initial event-loop handoff.
 
     The mailbox capacity deliberately equals evidence_config's explicit
     max_pending_tasks. No additional production default or hidden queue
@@ -364,30 +387,6 @@ async def run_live_entry_process(
         raise TypeError(
             "operating_config must be "
             "LiveOperatingConfig"
-        )
-
-    if not _valid_evidence_config(
-        evidence_config
-    ):
-        raise TypeError(
-            "evidence_config must be "
-            "LiveEntryEvidenceOnlyConfig"
-        )
-
-    if not _valid_execution_config(
-        execution_config
-    ):
-        raise TypeError(
-            "execution_config must be "
-            "LiveBuyExecutionConfig"
-        )
-
-    if not _valid_sell_supervisor_config(
-        sell_supervisor_config
-    ):
-        raise TypeError(
-            "sell_supervisor_config must be "
-            "LiveSellSupervisorConfig"
         )
 
     if not isinstance(
@@ -411,17 +410,9 @@ async def run_live_entry_process(
     if shutdown_event.is_set():
         return
 
-    scheduler = (
-        LiveEntryCandidateScheduler(
-            policy=evidence_config.policy,
-            max_concurrency=(
-                evidence_config.max_concurrency
-            ),
-            max_pending_tasks=(
-                evidence_config.max_pending_tasks
-            ),
-        )
-    )
+    scheduler: (
+        LiveEntryCandidateScheduler | None
+    ) = None
 
     mailbox: (
         LiveEntryResultMailbox | None
@@ -457,12 +448,6 @@ async def run_live_entry_process(
     sell_stop_event = asyncio.Event()
 
     try:
-        mailbox = LiveEntryResultMailbox(
-            max_pending_results=(
-                evidence_config.max_pending_tasks
-            )
-        )
-
         owner = LiveProcessOwner(
             config=operating_config
         )
@@ -470,6 +455,154 @@ async def run_live_entry_process(
         recovery_task = asyncio.create_task(
             owner.run_recovery_service(),
             name="delve-live-entry-recovery",
+        )
+
+        #
+        # Recovery-first startup barrier.
+        #
+        # Give the recovery task an event-loop turn before ANY
+        # fresh-capital configuration may be resolved.
+        #
+        await asyncio.sleep(
+            0
+        )
+
+        #
+        # Recovery failure always wins over fresh-capital startup.
+        #
+        if recovery_task.done():
+            try:
+                await recovery_task
+
+            except asyncio.CancelledError:
+                raise (
+                    LiveEntryProcessRunnerError(
+                        LIVE_ENTRY_PROCESS_RECOVERY_CANCELLED
+                    )
+                ) from None
+
+            raise LiveEntryProcessRunnerError(
+                LIVE_ENTRY_PROCESS_RECOVERY_STOPPED
+            )
+
+        if shutdown_event.is_set():
+            return
+
+        #
+        # Production launcher mode:
+        #
+        # Resolve evidence / BUY / SELL configuration only AFTER
+        # recovery has entered the event loop.
+        #
+        if fresh_config_loader is not None:
+            if (
+                evidence_config is not None
+                or execution_config is not None
+                or sell_supervisor_config is not None
+            ):
+                raise TypeError(
+                    "fresh config source is ambiguous"
+                )
+
+            if not callable(
+                fresh_config_loader
+            ):
+                raise TypeError(
+                    "fresh_config_loader must be callable"
+                )
+
+            loaded = fresh_config_loader()
+
+            if (
+                not isinstance(
+                    loaded,
+                    tuple,
+                )
+                or len(
+                    loaded
+                ) != 3
+            ):
+                raise TypeError(
+                    "fresh_config_loader must return "
+                    "three configs"
+                )
+
+            (
+                evidence_config,
+                execution_config,
+                sell_supervisor_config,
+            ) = loaded
+
+        #
+        # A SIGINT/SIGTERM or recovery failure may have occurred
+        # while the synchronous loader was running.
+        #
+        await asyncio.sleep(
+            0
+        )
+
+        if recovery_task.done():
+            try:
+                await recovery_task
+
+            except asyncio.CancelledError:
+                raise (
+                    LiveEntryProcessRunnerError(
+                        LIVE_ENTRY_PROCESS_RECOVERY_CANCELLED
+                    )
+                ) from None
+
+            raise LiveEntryProcessRunnerError(
+                LIVE_ENTRY_PROCESS_RECOVERY_STOPPED
+            )
+
+        if shutdown_event.is_set():
+            return
+
+        #
+        # Only now may fresh-capital configuration become a
+        # prerequisite for collector / BUY / SELL startup.
+        #
+        if not _valid_evidence_config(
+            evidence_config
+        ):
+            raise TypeError(
+                "evidence_config must be "
+                "LiveEntryEvidenceOnlyConfig"
+            )
+
+        if not _valid_execution_config(
+            execution_config
+        ):
+            raise TypeError(
+                "execution_config must be "
+                "LiveBuyExecutionConfig"
+            )
+
+        if not _valid_sell_supervisor_config(
+            sell_supervisor_config
+        ):
+            raise TypeError(
+                "sell_supervisor_config must be "
+                "LiveSellSupervisorConfig"
+            )
+
+        scheduler = (
+            LiveEntryCandidateScheduler(
+                policy=evidence_config.policy,
+                max_concurrency=(
+                    evidence_config.max_concurrency
+                ),
+                max_pending_tasks=(
+                    evidence_config.max_pending_tasks
+                ),
+            )
+        )
+
+        mailbox = LiveEntryResultMailbox(
+            max_pending_results=(
+                evidence_config.max_pending_tasks
+            )
         )
 
         collector_task = asyncio.create_task(
@@ -655,7 +788,10 @@ async def run_live_entry_process(
                 # Backstop scheduler ownership if collector never
                 # entered its coroutine body.
                 #
-                if not scheduler.closed:
+                if (
+                    scheduler is not None
+                    and not scheduler.closed
+                ):
                     await scheduler.close()
 
             finally:

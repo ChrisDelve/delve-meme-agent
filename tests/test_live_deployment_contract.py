@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import unittest
 
@@ -10,7 +9,8 @@ ENV_EXAMPLE = ROOT / ".env.example"
 PROCFILE = ROOT / "Procfile"
 GITIGNORE = ROOT / ".gitignore"
 PYTHON_VERSION_FILE = ROOT / ".python-version"
-RAILWAY_CONFIG = ROOT / "railway.json"
+RAILWAY_IAC = ROOT / ".railway/railway.py"
+RAILWAY_IAC_REQUIREMENTS = ROOT / ".railway/requirements.txt"
 
 
 EXPECTED_ENVIRONMENT_NAMES = {
@@ -101,28 +101,35 @@ class LiveDeploymentContractTests(unittest.TestCase):
             "3.14.4",
         )
 
-    def test_railway_uses_only_unified_live_launcher(self):
-        config = json.loads(
-            RAILWAY_CONFIG.read_text()
+    def test_railway_iac_uses_only_unified_live_launcher(self):
+        legacy_json = ROOT / "railway.json"
+        legacy_typescript = ROOT / ".railway/railway.ts"
+
+        self.assertFalse(legacy_json.exists())
+        self.assertFalse(legacy_typescript.exists())
+        self.assertTrue(RAILWAY_IAC.is_file())
+
+        content = RAILWAY_IAC.read_text()
+
+        self.assertIn(
+            'PARTIAL = "delve-meme-agent"',
+            content,
+        )
+        self.assertIn(
+            'start="python -m src.execution.live_entry_process_launcher",',
+            content,
+        )
+        self.assertEqual(content.count("service("), 1)
+        self.assertEqual(content.count("start="), 1)
+
+    def test_railway_iac_sdk_is_pinned(self):
+        self.assertEqual(
+            RAILWAY_IAC_REQUIREMENTS.read_text().strip(),
+            "railway-sdk==0.2.0",
         )
 
-        self.assertEqual(
-            set(config),
-            {"$schema", "deploy"},
-        )
-        self.assertEqual(
-            config["$schema"],
-            "https://railway.com/railway.schema.json",
-        )
-        self.assertEqual(
-            config["deploy"],
-            {
-                "startCommand": (
-                    "python -m "
-                    "src.execution.live_entry_process_launcher"
-                )
-            },
-        )
+        runtime_requirements = (ROOT / "requirements.txt").read_text()
+        self.assertNotIn("railway-sdk", runtime_requirements)
 
     def test_private_runtime_state_remains_gitignored(self):
         lines = {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import unittest
 
@@ -8,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ENV_EXAMPLE = ROOT / ".env.example"
 PROCFILE = ROOT / "Procfile"
 GITIGNORE = ROOT / ".gitignore"
+PYTHON_VERSION_FILE = ROOT / ".python-version"
+RAILWAY_CONFIG = ROOT / "railway.json"
 
 
 EXPECTED_ENVIRONMENT_NAMES = {
@@ -90,6 +93,35 @@ class LiveDeploymentContractTests(unittest.TestCase):
         self.assertEqual(
             lines,
             ["worker: python -m src.execution.live_entry_process_launcher"],
+        )
+
+    def test_python_runtime_version_is_locked(self):
+        self.assertEqual(
+            PYTHON_VERSION_FILE.read_text().strip(),
+            "3.14.4",
+        )
+
+    def test_railway_uses_only_unified_live_launcher(self):
+        config = json.loads(
+            RAILWAY_CONFIG.read_text()
+        )
+
+        self.assertEqual(
+            set(config),
+            {"$schema", "deploy"},
+        )
+        self.assertEqual(
+            config["$schema"],
+            "https://railway.com/railway.schema.json",
+        )
+        self.assertEqual(
+            config["deploy"],
+            {
+                "startCommand": (
+                    "python -m "
+                    "src.execution.live_entry_process_launcher"
+                )
+            },
         )
 
     def test_private_runtime_state_remains_gitignored(self):

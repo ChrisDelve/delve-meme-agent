@@ -27,12 +27,31 @@ MODULE = (
 class LiveEntryProcessLauncherTests(
     unittest.IsolatedAsyncioTestCase
 ):
+    def setUp(
+        self,
+    ):
+        self.preflight = AsyncMock(
+            return_value=object()
+        )
+
+        self.preflight_patcher = patch(
+            f"{MODULE}."
+            "run_live_startup_preflight",
+            new=self.preflight,
+        )
+
+        self.preflight_patcher.start()
+
+        self.addCleanup(
+            self.preflight_patcher.stop
+        )
+
     def test_version_is_locked(
         self,
     ):
         self.assertEqual(
             LIVE_ENTRY_PROCESS_LAUNCHER_VERSION,
-            "live-entry-process-launcher-v1",
+            "live-entry-process-launcher-v2",
         )
 
     async def test_component_mismatch_fails_before_signal_or_bootstrap(
@@ -624,6 +643,282 @@ class LiveEntryProcessLauncherTests(
         sell.assert_not_called()
         lifecycle.assert_not_awaited()
 
+
+    async def test_preflight_runs_before_lifecycle_with_exact_configs(
+        self,
+    ):
+        events = []
+
+        loop = Mock()
+
+        operating_config = object()
+        evidence_config = object()
+        execution_config = object()
+        sell_config = object()
+
+        async def preflight(
+            *,
+            operating_config,
+            execution_config,
+        ):
+            events.append(
+                "preflight"
+            )
+
+            return object()
+
+        async def lifecycle(
+            *,
+            operating_config,
+            evidence_config,
+            execution_config,
+            sell_supervisor_config,
+            shutdown_event,
+        ):
+            events.append(
+                "lifecycle"
+            )
+
+            self.assertIsInstance(
+                shutdown_event,
+                asyncio.Event,
+            )
+
+        self.preflight.side_effect = (
+            preflight
+        )
+
+        lifecycle_mock = AsyncMock(
+            side_effect=lifecycle
+        )
+
+        with (
+            patch(
+                f"{MODULE}."
+                "_install_shutdown_signal_handlers",
+                return_value=(
+                    loop,
+                    (),
+                ),
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_operating_config",
+                return_value=operating_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_entry_evidence_only_config",
+                return_value=evidence_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_buy_execution_config",
+                return_value=execution_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_sell_supervisor_config",
+                return_value=sell_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "run_live_entry_process",
+                new=lifecycle_mock,
+            ),
+        ):
+            await (
+                run_bootstrapped_live_entry_process()
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "preflight",
+                "lifecycle",
+            ],
+        )
+
+        self.preflight.assert_awaited_once_with(
+            operating_config=operating_config,
+            execution_config=execution_config,
+        )
+
+        lifecycle_mock.assert_awaited_once()
+
+    async def test_pending_shutdown_skips_preflight(
+        self,
+    ):
+        loop = asyncio.get_running_loop()
+        captured = {}
+
+        operating_config = object()
+        evidence_config = object()
+        execution_config = object()
+        sell_config = object()
+
+        def install(
+            *,
+            shutdown_event,
+        ):
+            captured[
+                "shutdown_event"
+            ] = shutdown_event
+
+            return (
+                loop,
+                (),
+            )
+
+        def operating(
+            *,
+            dotenv_path,
+        ):
+            loop.call_soon(
+                captured[
+                    "shutdown_event"
+                ].set
+            )
+
+            return operating_config
+
+        async def lifecycle(
+            *,
+            operating_config,
+            evidence_config,
+            execution_config,
+            sell_supervisor_config,
+            shutdown_event,
+        ):
+            self.assertTrue(
+                shutdown_event.is_set()
+            )
+
+        lifecycle_mock = AsyncMock(
+            side_effect=lifecycle
+        )
+
+        with (
+            patch(
+                f"{MODULE}."
+                "_install_shutdown_signal_handlers",
+                side_effect=install,
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_operating_config",
+                side_effect=operating,
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_entry_evidence_only_config",
+                return_value=evidence_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_buy_execution_config",
+                return_value=execution_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_sell_supervisor_config",
+                return_value=sell_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "run_live_entry_process",
+                new=lifecycle_mock,
+            ),
+        ):
+            await (
+                run_bootstrapped_live_entry_process()
+            )
+
+        self.preflight.assert_not_awaited()
+        lifecycle_mock.assert_awaited_once()
+
+    async def test_preflight_failure_prevents_lifecycle_and_removes_handlers(
+        self,
+    ):
+        loop = Mock()
+
+        operating_config = object()
+        evidence_config = object()
+        execution_config = object()
+        sell_config = object()
+
+        lifecycle = AsyncMock()
+
+        self.preflight.side_effect = (
+            RuntimeError(
+                "preflight failed"
+            )
+        )
+
+        with (
+            patch(
+                f"{MODULE}."
+                "_install_shutdown_signal_handlers",
+                return_value=(
+                    loop,
+                    (
+                        signal.SIGINT,
+                        signal.SIGTERM,
+                    ),
+                ),
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_operating_config",
+                return_value=operating_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_entry_evidence_only_config",
+                return_value=evidence_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_buy_execution_config",
+                return_value=execution_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "bootstrap_live_sell_supervisor_config",
+                return_value=sell_config,
+            ),
+            patch(
+                f"{MODULE}."
+                "run_live_entry_process",
+                new=lifecycle,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^preflight failed$",
+            ):
+                await (
+                    run_bootstrapped_live_entry_process()
+                )
+
+        self.preflight.assert_awaited_once_with(
+            operating_config=operating_config,
+            execution_config=execution_config,
+        )
+
+        lifecycle.assert_not_awaited()
+
+        self.assertEqual(
+            loop.remove_signal_handler.call_args_list,
+            [
+                call(
+                    signal.SIGINT
+                ),
+                call(
+                    signal.SIGTERM
+                ),
+            ],
+        )
 
 if __name__ == "__main__":
     unittest.main()

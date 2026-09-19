@@ -27,10 +27,14 @@ from src.execution.live_sell_supervisor_bootstrap import (
     LIVE_SELL_SUPERVISOR_BOOTSTRAP_VERSION,
     bootstrap_live_sell_supervisor_config,
 )
+from src.execution.live_startup_preflight import (
+    LIVE_STARTUP_PREFLIGHT_VERSION,
+    run_live_startup_preflight,
+)
 
 
 LIVE_ENTRY_PROCESS_LAUNCHER_VERSION = (
-    "live-entry-process-launcher-v1"
+    "live-entry-process-launcher-v2"
 )
 
 LIVE_ENTRY_PROCESS_LAUNCHER_COMPONENT_VERSION_MISMATCH = (
@@ -55,6 +59,8 @@ def _components_are_compatible(
         == "live-entry-evidence-only-bootstrap-v1"
         and LIVE_SELL_SUPERVISOR_BOOTSTRAP_VERSION
         == "live-sell-supervisor-bootstrap-v1"
+        and LIVE_STARTUP_PREFLIGHT_VERSION
+        == "live-startup-preflight-v1"
         and LIVE_ENTRY_PROCESS_RUNNER_VERSION
         == "live-entry-process-runner-v2"
         and LIVE_PROCESS_RUNNER_VERSION
@@ -78,6 +84,8 @@ async def run_bootstrapped_live_entry_process(
         load four explicit non-secret configs
                     ↓
         yield once for any pending shutdown signal
+                    ↓
+        if still active: startup preflight
                     ↓
         run_live_entry_process(...)
                     ↓
@@ -138,6 +146,19 @@ async def run_bootstrapped_live_entry_process(
         await asyncio.sleep(
             0
         )
+
+        #
+        # Do not touch signer / database / RPC merely to honor a
+        # shutdown which arrived during synchronous configuration.
+        #
+        # The unified runner still receives the already-set event so
+        # its own preexisting-shutdown invariant remains authoritative.
+        #
+        if not shutdown_event.is_set():
+            await run_live_startup_preflight(
+                operating_config=operating_config,
+                execution_config=execution_config,
+            )
 
         await run_live_entry_process(
             operating_config=operating_config,

@@ -3,16 +3,10 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-from src.execution.live_buy_execution_config import (
-    LiveBuyExecutionConfig,
-)
 from src.execution.live_operating_config import (
+    LIVE_OPERATING_CONFIG_VERSION,
     LiveOperatingConfig,
-)
-from src.execution.solana_message_signer import (
-    LazyEnvironmentMessageSigner,
 )
 from src.portfolio.live_reservations import (
     get_connection,
@@ -20,19 +14,7 @@ from src.portfolio.live_reservations import (
 
 
 LIVE_STARTUP_PREFLIGHT_VERSION = (
-    "live-startup-preflight-v1"
-)
-
-SOLANA_MAINNET_GENESIS_HASH = (
-    "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
-)
-
-LIVE_STARTUP_PREFLIGHT_SIGNER_UNAVAILABLE = (
-    "LIVE_STARTUP_PREFLIGHT_SIGNER_UNAVAILABLE"
-)
-
-LIVE_STARTUP_PREFLIGHT_SIGNER_WALLET_MISMATCH = (
-    "LIVE_STARTUP_PREFLIGHT_SIGNER_WALLET_MISMATCH"
+    "live-startup-preflight-v2"
 )
 
 LIVE_STARTUP_PREFLIGHT_DATABASE_UNAVAILABLE = (
@@ -41,18 +23,6 @@ LIVE_STARTUP_PREFLIGHT_DATABASE_UNAVAILABLE = (
 
 LIVE_STARTUP_PREFLIGHT_DATABASE_INTEGRITY_FAILED = (
     "LIVE_STARTUP_PREFLIGHT_DATABASE_INTEGRITY_FAILED"
-)
-
-LIVE_STARTUP_PREFLIGHT_RPC_UNAVAILABLE = (
-    "LIVE_STARTUP_PREFLIGHT_RPC_UNAVAILABLE"
-)
-
-LIVE_STARTUP_PREFLIGHT_RPC_CLUSTER_MISMATCH = (
-    "LIVE_STARTUP_PREFLIGHT_RPC_CLUSTER_MISMATCH"
-)
-
-LIVE_STARTUP_PREFLIGHT_RPC_RESULT_INVALID = (
-    "LIVE_STARTUP_PREFLIGHT_RPC_RESULT_INVALID"
 )
 
 
@@ -68,18 +38,20 @@ class LiveStartupPreflightError(
 )
 class LiveStartupPreflightResult:
     preflight_version: str
-
-    wallet_pubkey: str
     database_path: Path
 
-    operational_kill: bool
 
-    signer_checked: bool
-    signer_pubkey: str | None
-
-    rpc_genesis_hash: str
-    wallet_balance_lamports: int
-    rpc_slot: int
+def _valid_operating_config(
+    value: object,
+) -> bool:
+    return (
+        isinstance(
+            value,
+            LiveOperatingConfig,
+        )
+        and LIVE_OPERATING_CONFIG_VERSION
+        == "live-operating-config-v1"
+    )
 
 
 def _probe_live_database(
@@ -94,8 +66,14 @@ def _probe_live_database(
     BEGIN IMMEDIATE proves SQLite write-lock authority without
     committing any durable trading state. PRAGMA quick_check proves
     basic database integrity. The transaction is always rolled back.
+
+    This is the only startup prerequisite enforced before the unified
+    live process is allowed to begin recovery.
     """
-    connection: sqlite3.Connection | None = None
+
+    connection: (
+        sqlite3.Connection | None
+    ) = None
 
     try:
         connection = get_connection(
@@ -136,6 +114,7 @@ def _probe_live_database(
             try:
                 if connection.in_transaction:
                     connection.rollback()
+
             finally:
                 connection.close()
 
@@ -163,135 +142,48 @@ def _probe_live_database(
     return normalized
 
 
-async def _resolve_rpc_probe(
-    *,
-    wallet_pubkey: str,
-) -> tuple[str, Any]:
-    """
-    Resolve network identity and one authoritative wallet balance.
-
-    Imports are intentionally local. The existing Helius stack reads
-    its RPC environment at module import time, so startup configuration
-    must have populated the environment before this function is called.
-    """
-    from src.execution.live_wallet_balance import (
-        resolve_live_wallet_balance,
-    )
-    from src.safety.token_safety_resolver import (
-        HeliusRpcClient,
-    )
-
-    async with HeliusRpcClient() as rpc:
-        genesis_hash = await rpc.call(
-            "getGenesisHash",
-            [],
-        )
-
-    balance_result = (
-        await resolve_live_wallet_balance(
-            wallet_pubkey=wallet_pubkey
-        )
-    )
-
-    return (
-        genesis_hash,
-        balance_result,
-    )
-
-
-def _valid_nonnegative_int(
-    value: Any,
-) -> bool:
-    return (
-        isinstance(
-            value,
-            int,
-        )
-        and not isinstance(
-            value,
-            bool,
-        )
-        and value >= 0
-    )
-
-
 async def run_live_startup_preflight(
     *,
     operating_config: LiveOperatingConfig,
-    execution_config: LiveBuyExecutionConfig,
 ) -> LiveStartupPreflightResult:
     """
-    Fail-closed startup proof before the unified live process begins.
+    Prove only the structural startup prerequisite required for
+    recovery to operate: a usable canonical live database.
 
-    Authority deliberately NOT owned here:
-      - no LiveProcessOwner;
-      - no process lease acquisition;
-      - no transaction construction;
-      - no signing;
-      - no submission;
-      - no BUY/SELL/recovery authority;
-      - no trading-schema initialization.
+    Recovery-first invariant:
 
-    Order:
-        validated configs
-            ↓
-        signer identity when operational kill is OFF
+        validate operating configuration
             ↓
         create/open + integrity/write-lock proof of live DB
             ↓
-        exact Solana mainnet genesis proof
+        unified process begins
             ↓
-        exact configured-wallet balance RPC proof
+        durable BUY/SELL recovery receives first authority
             ↓
-        return immutable startup evidence
+        fresh-capital signer/RPC/wallet requirements remain owned
+        by their existing recovery-first runtime layers
 
-    When operational kill is ON, signer configuration is intentionally
-    untouched so a dry/shadow launch preserves lazy secret access.
+    This boundary deliberately does NOT:
+      - load or inspect signer/private-key configuration;
+      - resolve wallet balances;
+      - create an RPC client;
+      - prove network identity;
+      - acquire LiveProcessOwner or the process lease;
+      - construct/sign/submit transactions;
+      - exercise BUY/SELL/recovery authority;
+      - initialize trading schemas.
+
+    A signer, RPC provider, or fresh-capital prerequisite failure must
+    never prevent the process from reaching durable recovery.
     """
-    if not isinstance(
-        operating_config,
-        LiveOperatingConfig,
+
+    if not _valid_operating_config(
+        operating_config
     ):
         raise TypeError(
-            "operating_config must be LiveOperatingConfig"
+            "operating_config must be "
+            "LiveOperatingConfig"
         )
-
-    if not isinstance(
-        execution_config,
-        LiveBuyExecutionConfig,
-    ):
-        raise TypeError(
-            "execution_config must be LiveBuyExecutionConfig"
-        )
-
-    wallet_pubkey = (
-        execution_config.wallet_pubkey.strip()
-    )
-
-    signer_checked = False
-    signer_pubkey: str | None = None
-
-    if not operating_config.operational_kill:
-        signer = (
-            LazyEnvironmentMessageSigner()
-        )
-
-        try:
-            signer_pubkey = str(
-                signer.pubkey()
-            )
-
-        except Exception:
-            raise LiveStartupPreflightError(
-                LIVE_STARTUP_PREFLIGHT_SIGNER_UNAVAILABLE
-            ) from None
-
-        signer_checked = True
-
-        if signer_pubkey != wallet_pubkey:
-            raise LiveStartupPreflightError(
-                LIVE_STARTUP_PREFLIGHT_SIGNER_WALLET_MISMATCH
-            )
 
     database_path = (
         _probe_live_database(
@@ -299,92 +191,9 @@ async def run_live_startup_preflight(
         )
     )
 
-    try:
-        (
-            genesis_hash,
-            balance_result,
-        ) = await _resolve_rpc_probe(
-            wallet_pubkey=wallet_pubkey
-        )
-
-    except Exception:
-        raise LiveStartupPreflightError(
-            LIVE_STARTUP_PREFLIGHT_RPC_UNAVAILABLE
-        ) from None
-
-    if (
-        not isinstance(
-            genesis_hash,
-            str,
-        )
-        or genesis_hash.strip()
-        != SOLANA_MAINNET_GENESIS_HASH
-    ):
-        raise LiveStartupPreflightError(
-            LIVE_STARTUP_PREFLIGHT_RPC_CLUSTER_MISMATCH
-        )
-
-    status = getattr(
-        balance_result,
-        "status",
-        None,
-    )
-
-    reasons = getattr(
-        balance_result,
-        "reasons",
-        None,
-    )
-
-    resolved_wallet = getattr(
-        balance_result,
-        "wallet_pubkey",
-        None,
-    )
-
-    balance_lamports = getattr(
-        balance_result,
-        "balance_lamports",
-        None,
-    )
-
-    rpc_slot = getattr(
-        balance_result,
-        "rpc_slot",
-        None,
-    )
-
-    if (
-        status != "RESOLVED"
-        or reasons != ()
-        or resolved_wallet != wallet_pubkey
-        or not _valid_nonnegative_int(
-            balance_lamports
-        )
-        or not _valid_nonnegative_int(
-            rpc_slot
-        )
-    ):
-        raise LiveStartupPreflightError(
-            LIVE_STARTUP_PREFLIGHT_RPC_RESULT_INVALID
-        )
-
     return LiveStartupPreflightResult(
         preflight_version=(
             LIVE_STARTUP_PREFLIGHT_VERSION
         ),
-        wallet_pubkey=wallet_pubkey,
         database_path=database_path,
-        operational_kill=(
-            operating_config.operational_kill
-        ),
-        signer_checked=signer_checked,
-        signer_pubkey=signer_pubkey,
-        rpc_genesis_hash=(
-            SOLANA_MAINNET_GENESIS_HASH
-        ),
-        wallet_balance_lamports=(
-            balance_lamports
-        ),
-        rpc_slot=rpc_slot,
     )

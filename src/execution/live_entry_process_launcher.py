@@ -34,7 +34,7 @@ from src.execution.live_startup_preflight import (
 
 
 LIVE_ENTRY_PROCESS_LAUNCHER_VERSION = (
-    "live-entry-process-launcher-v2"
+    "live-entry-process-launcher-v3"
 )
 
 LIVE_ENTRY_PROCESS_LAUNCHER_COMPONENT_VERSION_MISMATCH = (
@@ -60,7 +60,7 @@ def _components_are_compatible(
         and LIVE_SELL_SUPERVISOR_BOOTSTRAP_VERSION
         == "live-sell-supervisor-bootstrap-v1"
         and LIVE_STARTUP_PREFLIGHT_VERSION
-        == "live-startup-preflight-v1"
+        == "live-startup-preflight-v2"
         and LIVE_ENTRY_PROCESS_RUNNER_VERSION
         == "live-entry-process-runner-v2"
         and LIVE_PROCESS_RUNNER_VERSION
@@ -157,7 +157,6 @@ async def run_bootstrapped_live_entry_process(
         if not shutdown_event.is_set():
             await run_live_startup_preflight(
                 operating_config=operating_config,
-                execution_config=execution_config,
             )
 
         await run_live_entry_process(

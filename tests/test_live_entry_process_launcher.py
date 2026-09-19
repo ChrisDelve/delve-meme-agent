@@ -51,7 +51,7 @@ class LiveEntryProcessLauncherTests(
     ):
         self.assertEqual(
             LIVE_ENTRY_PROCESS_LAUNCHER_VERSION,
-            "live-entry-process-launcher-v2",
+            "live-entry-process-launcher-v3",
         )
 
     async def test_component_mismatch_fails_before_signal_or_bootstrap(
@@ -657,9 +657,11 @@ class LiveEntryProcessLauncherTests(
         sell_config = object()
 
         async def preflight(
+
             *,
+
             operating_config,
-            execution_config,
+
         ):
             events.append(
                 "preflight"
@@ -741,7 +743,6 @@ class LiveEntryProcessLauncherTests(
 
         self.preflight.assert_awaited_once_with(
             operating_config=operating_config,
-            execution_config=execution_config,
         )
 
         lifecycle_mock.assert_awaited_once()
@@ -903,7 +904,6 @@ class LiveEntryProcessLauncherTests(
 
         self.preflight.assert_awaited_once_with(
             operating_config=operating_config,
-            execution_config=execution_config,
         )
 
         lifecycle.assert_not_awaited()

@@ -24,6 +24,7 @@ from src.execution.live_entry_process_runner import (
     LIVE_ENTRY_PROCESS_SELL_STOPPED,
     LiveEntryProcessRunnerError,
     _run_live_entry_capital_consumer,
+    _run_market_collector_with_live_entry,
     _settle_without_cancelling,
     run_live_entry_process,
 )
@@ -538,6 +539,41 @@ class LiveEntryProcessRunnerTests(
             await consumer
 
         handoff.assert_not_awaited()
+
+    async def test_live_collector_adapter_disables_shadow_portfolio(
+        self,
+    ):
+        scheduler = Mock()
+        mailbox = Mock()
+        collector = AsyncMock()
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "HELIUS_API_KEY":
+                        "test-key",
+                },
+            ),
+            patch(
+                "src.data.market_collector."
+                "run_market_collector",
+                new=collector,
+            ),
+        ):
+            await (
+                _run_market_collector_with_live_entry(
+                    scheduler=scheduler,
+                    mailbox=mailbox,
+                )
+            )
+
+        collector.assert_awaited_once_with(
+            live_entry_scheduler=scheduler,
+            live_entry_result_mailbox=mailbox,
+            shadow_portfolio_enabled=False,
+        )
+
 
     async def test_active_handoff_is_not_cancelled_by_stop(
         self,

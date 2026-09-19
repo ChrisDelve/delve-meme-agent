@@ -447,6 +447,7 @@ def process_buy_event(
     *,
     live_entry_scheduler=None,
     live_entry_result_mailbox=None,
+    shadow_portfolio_enabled: bool = True,
 ):
     observed_at = int(time.time())
     result = save_buy(
@@ -498,7 +499,10 @@ def process_buy_event(
             f"{type(error).__name__}: {error}"
         )
 
-    if prediction is not None:
+    if (
+        prediction is not None
+        and shadow_portfolio_enabled
+    ):
         try:
             schedule_pretrade_shadow_candidate(
                 entry_signature=(
@@ -676,38 +680,40 @@ def process_buy_event(
                 f"{error}"
             )
 
-    shadow_signal = record_shadow_signal(
-        signature=signature,
-        slot=slot,
-        wallet=trade_event["user"],
-        mint=trade_event["mint"],
-        quote_mint=trade_event["quote_mint"],
-        trade_timestamp=trade_event["timestamp"],
-        sol_amount_lamports=trade_event["sol_amount"],
-        token_amount=trade_event["token_amount"],
-        observed_rank=rank,
-        entry_age_seconds=entry_age,
-        mayhem_mode=trade_event["mayhem_mode"],
-    )
+    if shadow_portfolio_enabled:
+        shadow_signal = record_shadow_signal(
+            signature=signature,
+            slot=slot,
+            wallet=trade_event["user"],
+            mint=trade_event["mint"],
+            quote_mint=trade_event["quote_mint"],
+            trade_timestamp=trade_event["timestamp"],
+            sol_amount_lamports=trade_event["sol_amount"],
+            token_amount=trade_event["token_amount"],
+            observed_rank=rank,
+            entry_age_seconds=entry_age,
+            mayhem_mode=trade_event["mayhem_mode"],
+        )
 
-    if shadow_signal is not None:
-        print()
-        print("👻 SHADOW SIGNAL")
-        print(
-            f"Wallet: {shadow_signal['wallet']}"
-        )
-        print(
-            f"Mint:   {shadow_signal['mint']}"
-        )
-        print(
-            "Frozen Alpha: "
-            f"{shadow_signal['alpha_score']:.2f}"
-        )
+        if shadow_signal is not None:
+            print()
+            print("👻 SHADOW SIGNAL")
+            print(
+                f"Wallet: {shadow_signal['wallet']}"
+            )
+            print(
+                f"Mint:   {shadow_signal['mint']}"
+            )
+            print(
+                "Frozen Alpha: "
+                f"{shadow_signal['alpha_score']:.2f}"
+            )
 
 async def listen(
     *,
     live_entry_scheduler=None,
     live_entry_result_mailbox=None,
+    shadow_portfolio_enabled: bool = True,
 ):
     init_db()
     invalidate_stale_intervals()
@@ -853,8 +859,11 @@ async def listen(
                         # Only create a task when this mint
                         # actually has an open shadow position.
                         #
-                        if is_open_shadow_mint_tracked(
-                            trade_event["mint"]
+                        if (
+                            shadow_portfolio_enabled
+                            and is_open_shadow_mint_tracked(
+                                trade_event["mint"]
+                            )
                         ):
                             asyncio.create_task(
                                 process_shadow_position_event_safe(
@@ -866,16 +875,25 @@ async def listen(
                         # Candidate generation remains BUY-only.
                         #
                         if trade_event["is_buy"]:
+                            buy_kwargs = {
+                                "live_entry_scheduler": (
+                                    live_entry_scheduler
+                                ),
+                                "live_entry_result_mailbox": (
+                                    live_entry_result_mailbox
+                                ),
+                            }
+
+                            if not shadow_portfolio_enabled:
+                                buy_kwargs[
+                                    "shadow_portfolio_enabled"
+                                ] = False
+
                             process_buy_event(
                                 signature,
                                 slot,
                                 trade_event,
-                                live_entry_scheduler=(
-                                    live_entry_scheduler
-                                ),
-                                live_entry_result_mailbox=(
-                                    live_entry_result_mailbox
-                                ),
+                                **buy_kwargs,
                             )
 
                     #
@@ -928,6 +946,7 @@ async def run_market_collector(
     live_entry_result_mailbox: (
         LiveEntryResultMailbox | None
     ) = None,
+    shadow_portfolio_enabled: bool = True,
 ) -> None:
     """
     Run the market collector.
@@ -975,51 +994,61 @@ async def run_market_collector(
     sweeper_task = None
 
     try:
-        #
-        # Initialize and validate the shadow ledger
-        # before live market events can arrive.
-        #
-        shadow_account = (
-            initialize_shadow_account()
-        )
+        if shadow_portfolio_enabled:
+            #
+            # Initialize and validate the shadow ledger
+            # before live market events can arrive.
+            #
+            shadow_account = (
+                initialize_shadow_account()
+            )
 
-        print(
-            "💰 SHADOW ACCOUNT | "
-            f"equity="
-            f"{shadow_account.current_equity_lamports / 1_000_000_000:.9f} SOL | "
-            f"cash="
-            f"{shadow_account.cash_balance_lamports / 1_000_000_000:.9f} SOL | "
-            f"open={shadow_account.open_positions}"
-        )
+            print(
+                "💰 SHADOW ACCOUNT | "
+                f"equity="
+                f"{shadow_account.current_equity_lamports / 1_000_000_000:.9f} SOL | "
+                f"cash="
+                f"{shadow_account.cash_balance_lamports / 1_000_000_000:.9f} SOL | "
+                f"open={shadow_account.open_positions}"
+            )
 
-        #
-        # Restore persisted OPEN shadow positions
-        # before live market events can arrive.
-        #
-        tracked_mints = (
-            initialize_shadow_position_manager()
-        )
+            #
+            # Restore persisted OPEN shadow positions
+            # before live market events can arrive.
+            #
+            tracked_mints = (
+                initialize_shadow_position_manager()
+            )
 
-        print(
-            "📒 SHADOW PORTFOLIO | "
-            f"{len(tracked_mints)} open position(s) restored"
-        )
+            print(
+                "📒 SHADOW PORTFOLIO | "
+                f"{len(tracked_mints)} open position(s) restored"
+            )
 
-        #
-        # Exactly one periodic sweeper for the
-        # lifetime of this collector process.
-        #
-        sweeper_task = asyncio.create_task(
-            run_shadow_position_sweeper()
-        )
+            #
+            # Exactly one periodic sweeper for the
+            # lifetime of this collector process.
+            #
+            sweeper_task = asyncio.create_task(
+                run_shadow_position_sweeper()
+            )
 
-        await listen(
-            live_entry_scheduler=(
+        listen_kwargs = {
+            "live_entry_scheduler": (
                 live_entry_scheduler
             ),
-            live_entry_result_mailbox=(
+            "live_entry_result_mailbox": (
                 live_entry_result_mailbox
             ),
+        }
+
+        if not shadow_portfolio_enabled:
+            listen_kwargs[
+                "shadow_portfolio_enabled"
+            ] = False
+
+        await listen(
+            **listen_kwargs
         )
 
     finally:

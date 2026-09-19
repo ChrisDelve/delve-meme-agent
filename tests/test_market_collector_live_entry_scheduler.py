@@ -628,6 +628,173 @@ class MarketCollectorLiveEntrySchedulerTests(
             result_mailbox.failed
         )
 
+    async def test_live_mode_skips_shadow_portfolio_startup(
+        self,
+    ):
+        policy = LiveEntryPolicy(
+            min_probability_2x_15m=0.40,
+            max_candidate_age_seconds=5,
+        )
+
+        scheduler = LiveEntryCandidateScheduler(
+            policy=policy,
+            max_concurrency=1,
+            max_pending_tasks=1,
+        )
+
+        result_mailbox = LiveEntryResultMailbox(
+            max_pending_results=1
+        )
+
+        async def listen_stub(
+            *,
+            live_entry_scheduler=None,
+            live_entry_result_mailbox=None,
+            shadow_portfolio_enabled=True,
+        ):
+            self.assertIs(
+                live_entry_scheduler,
+                scheduler,
+            )
+            self.assertIs(
+                live_entry_result_mailbox,
+                result_mailbox,
+            )
+            self.assertFalse(
+                shadow_portfolio_enabled
+            )
+
+        with (
+            patch.object(
+                market_collector,
+                "initialize_shadow_account",
+            ) as initialize_account,
+            patch.object(
+                market_collector,
+                "initialize_shadow_position_manager",
+            ) as initialize_positions,
+            patch.object(
+                market_collector,
+                "run_shadow_position_sweeper",
+            ) as shadow_sweeper,
+            patch.object(
+                market_collector,
+                "listen",
+                side_effect=listen_stub,
+            ),
+            patch(
+                "builtins.print"
+            ),
+            patch.dict(
+                os.environ,
+                {},
+                clear=False,
+            ),
+        ):
+            os.environ.pop(
+                "SHADOW_STARTING_EQUITY_SOL",
+                None,
+            )
+
+            await (
+                market_collector
+                .run_market_collector(
+                    live_entry_scheduler=scheduler,
+                    live_entry_result_mailbox=(
+                        result_mailbox
+                    ),
+                    shadow_portfolio_enabled=False,
+                )
+            )
+
+        initialize_account.assert_not_called()
+        initialize_positions.assert_not_called()
+        shadow_sweeper.assert_not_called()
+
+        self.assertTrue(
+            scheduler.closed
+        )
+
+
+    async def test_live_mode_keeps_candidate_pipeline_without_shadow_entry(
+        self,
+    ):
+        scheduler = Mock()
+
+        candidate_result = SimpleNamespace(
+            status="PASS",
+            stage="EVIDENCE",
+            reasons=(),
+            evidence_ready=True,
+        )
+
+        async def finished():
+            return candidate_result
+
+        task = asyncio.create_task(
+            finished()
+        )
+
+        scheduler.schedule.return_value = (
+            SimpleNamespace(
+                scheduled=True,
+                reasons=(),
+                task=task,
+            )
+        )
+
+        prediction = self.prediction(
+            eligible=1
+        )
+
+        with (
+            patch.object(
+                market_collector,
+                "save_buy",
+                return_value={
+                    "observed_rank": 1,
+                    "entry_age_seconds": 0,
+                },
+            ),
+            patch.object(
+                market_collector,
+                "record_model_shadow_prediction",
+                return_value=prediction,
+            ) as model_prediction,
+            patch.object(
+                market_collector,
+                "schedule_pretrade_shadow_candidate",
+            ) as legacy_pretrade,
+            patch.object(
+                market_collector,
+                "record_shadow_signal",
+            ) as legacy_shadow_signal,
+            patch.object(
+                market_collector.time,
+                "time",
+                return_value=1_001,
+            ),
+            patch(
+                "builtins.print"
+            ),
+        ):
+            market_collector.process_buy_event(
+                "signature-1",
+                123,
+                self.trade_event(),
+                live_entry_scheduler=scheduler,
+                shadow_portfolio_enabled=False,
+            )
+
+            await task
+            await asyncio.sleep(0)
+
+        model_prediction.assert_called_once()
+        scheduler.schedule.assert_called_once()
+        legacy_pretrade.assert_not_called()
+        legacy_shadow_signal.assert_not_called()
+
+
     async def test_invalid_mailbox_type_fails_before_collector_startup(
         self,
     ):

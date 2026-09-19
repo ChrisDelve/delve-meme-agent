@@ -215,6 +215,7 @@ async def _run_market_collector_with_live_entry(
     await run_market_collector(
         live_entry_scheduler=scheduler,
         live_entry_result_mailbox=mailbox,
+        shadow_portfolio_enabled=False,
     )
 
 

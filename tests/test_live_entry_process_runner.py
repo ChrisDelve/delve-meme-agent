@@ -601,7 +601,11 @@ class LiveEntryProcessRunnerTests(
 
             await release_handoff.wait()
 
-            return object()
+            result = Mock()
+            result.status = "INVOKED"
+            result.buy_result = None
+
+            return result
 
         handoff = AsyncMock(
             side_effect=handoff_stub
@@ -639,6 +643,82 @@ class LiveEntryProcessRunnerTests(
             owner=owner,
             pipeline_result=pipeline_result,
             execution_config=execution,
+        )
+
+    async def test_consumer_logs_handoff_buy_authority_result(
+        self,
+    ):
+        owner = Mock()
+        execution = Mock()
+        pipeline_result = object()
+
+        mailbox = Mock()
+        mailbox.receive = AsyncMock(
+            return_value=pipeline_result
+        )
+
+        stop_event = asyncio.Event()
+
+        buy_result = Mock()
+        buy_result.status = "HALTED"
+        buy_result.stage = "KILL"
+        buy_result.reasons = (
+            "LIVE_BUY_RUNTIME_KILL_ACTIVE",
+        )
+
+        handoff_result = Mock()
+        handoff_result.status = "INVOKED"
+        handoff_result.buy_result = buy_result
+
+        async def handoff_stub(
+            *,
+            owner,
+            pipeline_result,
+            execution_config,
+        ):
+            del (
+                owner,
+                pipeline_result,
+                execution_config,
+            )
+
+            stop_event.set()
+
+            return handoff_result
+
+        handoff = AsyncMock(
+            side_effect=handoff_stub
+        )
+
+        with (
+            patch(
+                f"{MODULE}."
+                "run_live_entry_capital_handoff_once",
+                new=handoff,
+            ),
+            patch(
+                "builtins.print"
+            ) as output,
+        ):
+            await _run_live_entry_capital_consumer(
+                owner=owner,
+                mailbox=mailbox,
+                execution_config=execution,
+                stop_event=stop_event,
+            )
+
+        handoff.assert_awaited_once_with(
+            owner=owner,
+            pipeline_result=pipeline_result,
+            execution_config=execution,
+        )
+
+        output.assert_called_once_with(
+            "💰 LIVE CAPITAL HANDOFF | "
+            "status=INVOKED | "
+            "buy_status=HALTED | "
+            "buy_stage=KILL | "
+            "reasons=LIVE_BUY_RUNTIME_KILL_ACTIVE"
         )
 
     async def test_recovery_exception_propagates_and_closes_owner(

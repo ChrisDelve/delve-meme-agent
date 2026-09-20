@@ -282,7 +282,7 @@ async def _run_live_entry_capital_consumer(
                 if stop_event.is_set():
                     return
 
-                await (
+                handoff_result = await (
                     run_live_entry_capital_handoff_once(
                         owner=owner,
                         pipeline_result=(
@@ -293,6 +293,33 @@ async def _run_live_entry_capital_consumer(
                         ),
                     )
                 )
+
+                buy_result = handoff_result.buy_result
+
+                if buy_result is None:
+                    print(
+                        "💰 LIVE CAPITAL HANDOFF | "
+                        f"status={handoff_result.status} | "
+                        "buy_status=NONE | "
+                        "buy_stage=NONE | "
+                        "reasons=NONE"
+                    )
+                else:
+                    reasons = (
+                        ",".join(
+                            buy_result.reasons
+                        )
+                        if buy_result.reasons
+                        else "NONE"
+                    )
+
+                    print(
+                        "💰 LIVE CAPITAL HANDOFF | "
+                        f"status={handoff_result.status} | "
+                        f"buy_status={buy_result.status} | "
+                        f"buy_stage={buy_result.stage} | "
+                        f"reasons={reasons}"
+                    )
 
                 continue
 

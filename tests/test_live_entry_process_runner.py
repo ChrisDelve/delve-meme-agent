@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import sqlite3
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import (
     AsyncMock,
@@ -19,10 +21,12 @@ from src.execution.live_entry_evidence_only_config import (
 from src.execution.live_entry_process_runner import (
     LIVE_ENTRY_PROCESS_COLLECTOR_STOPPED,
     LIVE_ENTRY_PROCESS_MAILBOX_FAILED,
+    LIVE_ENTRY_PROCESS_POSITION_SCHEMA_INIT_FAILED,
     LIVE_ENTRY_PROCESS_RECOVERY_STOPPED,
     LIVE_ENTRY_PROCESS_RUNNER_VERSION,
     LIVE_ENTRY_PROCESS_SELL_STOPPED,
     LiveEntryProcessRunnerError,
+    _initialize_live_position_schema,
     _run_live_entry_capital_consumer,
     _run_market_collector_with_live_entry,
     _settle_without_cancelling,
@@ -84,6 +88,20 @@ class LiveEntryProcessRunnerTests(
 
         self.addCleanup(
             self.sell_service_patcher.stop
+        )
+
+        self.position_schema_initializer = Mock()
+
+        self.position_schema_initializer_patcher = patch(
+            f"{MODULE}."
+            "_initialize_live_position_schema",
+            new=self.position_schema_initializer,
+        )
+
+        self.position_schema_initializer_patcher.start()
+
+        self.addCleanup(
+            self.position_schema_initializer_patcher.stop
         )
 
     @staticmethod
@@ -187,7 +205,60 @@ class LiveEntryProcessRunnerTests(
     ):
         self.assertEqual(
             LIVE_ENTRY_PROCESS_RUNNER_VERSION,
-            "live-entry-process-runner-v3",
+            "live-entry-process-runner-v4",
+        )
+
+    def test_position_schema_initializer_creates_pristine_empty_table(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            db_path = (
+                Path(directory)
+                / "live.db"
+            )
+
+            _initialize_live_position_schema(
+                db_path
+            )
+
+            #
+            # Initialization must be idempotent.
+            #
+            _initialize_live_position_schema(
+                db_path
+            )
+
+            connection = sqlite3.connect(
+                db_path
+            )
+
+            try:
+                table = connection.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name = 'live_positions'
+                    """
+                ).fetchone()
+
+                row_count = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM live_positions
+                    """
+                ).fetchone()[0]
+
+            finally:
+                connection.close()
+
+        self.assertIsNotNone(
+            table
+        )
+
+        self.assertEqual(
+            row_count,
+            0,
         )
 
     async def test_preexisting_shutdown_acquires_no_process_authority(
@@ -1644,6 +1715,195 @@ class LiveEntryProcessRunnerTests(
         self.assertTrue(
             shutdown_event.is_set()
         )
+
+        owner.close.assert_called_once_with()
+
+
+    async def test_position_schema_initializes_after_recovery_before_fresh_tasks(
+        self,
+    ):
+        events = []
+
+        shutdown_event = asyncio.Event()
+        recovery_entered = asyncio.Event()
+
+        operating_config = (
+            self.operating_config()
+        )
+
+        owner = Mock()
+
+        async def recovery():
+            events.append(
+                "recovery"
+            )
+
+            recovery_entered.set()
+
+            await asyncio.Event().wait()
+
+        owner.run_recovery_service = AsyncMock(
+            side_effect=recovery
+        )
+
+        owner.close = Mock()
+
+        owner_constructor = Mock(
+            return_value=owner
+        )
+
+        scheduler_constructor = Mock()
+
+        def fresh_config_loader():
+            self.assertTrue(
+                recovery_entered.is_set()
+            )
+
+            events.append(
+                "fresh-config"
+            )
+
+            return (
+                self.evidence_config(),
+                self.execution_config(),
+                self.sell_config(),
+            )
+
+        def initialize_schema(
+            db_path,
+        ):
+            self.assertTrue(
+                recovery_entered.is_set()
+            )
+
+            self.assertEqual(
+                db_path,
+                operating_config.db_path,
+            )
+
+            events.append(
+                "position-schema"
+            )
+
+            #
+            # Stop at the new boundary so no fresh task can
+            # be constructed during this ordering proof.
+            #
+            shutdown_event.set()
+
+        self.position_schema_initializer.side_effect = (
+            initialize_schema
+        )
+
+        with (
+            patch(
+                f"{MODULE}.LiveProcessOwner",
+                new=owner_constructor,
+            ),
+            patch(
+                f"{MODULE}."
+                "LiveEntryCandidateScheduler",
+                new=scheduler_constructor,
+            ),
+        ):
+            await run_live_entry_process(
+                operating_config=(
+                    operating_config
+                ),
+                fresh_config_loader=(
+                    fresh_config_loader
+                ),
+                shutdown_event=shutdown_event,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "recovery",
+                "fresh-config",
+                "position-schema",
+            ],
+        )
+
+        self.position_schema_initializer.assert_called_once_with(
+            operating_config.db_path
+        )
+
+        scheduler_constructor.assert_not_called()
+
+        owner.close.assert_called_once_with()
+
+
+    async def test_position_schema_failure_is_fatal_before_fresh_tasks(
+        self,
+    ):
+        recovery_entered = asyncio.Event()
+
+        owner = Mock()
+
+        async def recovery():
+            recovery_entered.set()
+
+            await asyncio.Event().wait()
+
+        owner.run_recovery_service = AsyncMock(
+            side_effect=recovery
+        )
+
+        owner.close = Mock()
+
+        owner_constructor = Mock(
+            return_value=owner
+        )
+
+        scheduler_constructor = Mock()
+
+        self.position_schema_initializer.side_effect = (
+            RuntimeError(
+                "schema boom"
+            )
+        )
+
+        with (
+            patch(
+                f"{MODULE}.LiveProcessOwner",
+                new=owner_constructor,
+            ),
+            patch(
+                f"{MODULE}."
+                "LiveEntryCandidateScheduler",
+                new=scheduler_constructor,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                LiveEntryProcessRunnerError,
+                (
+                    "^"
+                    + LIVE_ENTRY_PROCESS_POSITION_SCHEMA_INIT_FAILED
+                    + "$"
+                ),
+            ):
+                await run_live_entry_process(
+                    operating_config=(
+                        self.operating_config()
+                    ),
+                    evidence_config=(
+                        self.evidence_config()
+                    ),
+                    execution_config=(
+                        self.execution_config()
+                    ),
+                    sell_supervisor_config=(
+                        self.sell_config()
+                    ),
+                    shutdown_event=asyncio.Event(),
+                )
+
+        self.assertTrue(
+            recovery_entered.is_set()
+        )
+
+        scheduler_constructor.assert_not_called()
 
         owner.close.assert_called_once_with()
 

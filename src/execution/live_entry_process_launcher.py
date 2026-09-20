@@ -62,7 +62,7 @@ def _components_are_compatible(
         and LIVE_STARTUP_PREFLIGHT_VERSION
         == "live-startup-preflight-v2"
         and LIVE_ENTRY_PROCESS_RUNNER_VERSION
-        == "live-entry-process-runner-v3"
+        == "live-entry-process-runner-v4"
         and LIVE_PROCESS_RUNNER_VERSION
         == "live-process-runner-v1"
     )

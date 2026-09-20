@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any, Callable
 
 from src.execution.live_buy_execution_config import (
@@ -39,10 +40,16 @@ from src.execution.live_sell_supervisor_service import (
     LIVE_SELL_SUPERVISOR_SERVICE_VERSION,
     run_live_sell_supervisor_service,
 )
+from src.portfolio.live_positions import (
+    init_schema as init_position_schema,
+)
+from src.portfolio.live_reservations import (
+    get_connection,
+)
 
 
 LIVE_ENTRY_PROCESS_RUNNER_VERSION = (
-    "live-entry-process-runner-v3"
+    "live-entry-process-runner-v4"
 )
 
 LIVE_ENTRY_PROCESS_RECOVERY_STOPPED = (
@@ -51,6 +58,10 @@ LIVE_ENTRY_PROCESS_RECOVERY_STOPPED = (
 
 LIVE_ENTRY_PROCESS_RECOVERY_CANCELLED = (
     "LIVE_ENTRY_PROCESS_RECOVERY_CANCELLED"
+)
+
+LIVE_ENTRY_PROCESS_POSITION_SCHEMA_INIT_FAILED = (
+    "LIVE_ENTRY_PROCESS_POSITION_SCHEMA_INIT_FAILED"
 )
 
 LIVE_ENTRY_PROCESS_COLLECTOR_STOPPED = (
@@ -86,6 +97,46 @@ class LiveEntryProcessRunnerError(
     RuntimeError
 ):
     pass
+
+
+def _initialize_live_position_schema(
+    db_path: Path,
+) -> None:
+    """
+    Establish the structural live-position schema before
+    fresh BUY/SELL tasks become reachable.
+
+    This performs no:
+    - reservation;
+    - position creation;
+    - transaction construction;
+    - signing;
+    - submission;
+    - RPC/network activity.
+    """
+    connection = get_connection(
+        db_path
+    )
+
+    try:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        init_position_schema(
+            connection
+        )
+
+        connection.commit()
+
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+
+        raise
+
+    finally:
+        connection.close()
 
 
 def _valid_operating_config(
@@ -614,6 +665,55 @@ async def run_live_entry_process(
                 "sell_supervisor_config must be "
                 "LiveSellSupervisorConfig"
             )
+
+        #
+        # First-live structural invariant.
+        #
+        # Recovery has already entered the event loop and fresh
+        # configuration has passed its contracts. Before any
+        # collector / BUY / SELL task can become reachable, the
+        # authoritative live DB must contain the structural
+        # live_positions schema required by account-risk reads.
+        #
+        # Missing position state must continue to fail closed;
+        # only the empty structural schema is established here.
+        #
+        try:
+            _initialize_live_position_schema(
+                operating_config.db_path
+            )
+
+        except Exception:
+            raise LiveEntryProcessRunnerError(
+                LIVE_ENTRY_PROCESS_POSITION_SCHEMA_INIT_FAILED
+            ) from None
+
+        #
+        # Schema initialization is synchronous. Yield once so a
+        # recovery failure or shutdown that became pending during
+        # that boundary still wins before fresh-capital tasks.
+        #
+        await asyncio.sleep(
+            0
+        )
+
+        if recovery_task.done():
+            try:
+                await recovery_task
+
+            except asyncio.CancelledError:
+                raise (
+                    LiveEntryProcessRunnerError(
+                        LIVE_ENTRY_PROCESS_RECOVERY_CANCELLED
+                    )
+                ) from None
+
+            raise LiveEntryProcessRunnerError(
+                LIVE_ENTRY_PROCESS_RECOVERY_STOPPED
+            )
+
+        if shutdown_event.is_set():
+            return
 
         scheduler = (
             LiveEntryCandidateScheduler(

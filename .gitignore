@@ -1,5 +1,17 @@
 .venv/
+
+# Local environment / private runtime configuration
 .env
+.env.*
+!.env.example
+
+# Private signing / wallet material
+*.key
+*.pem
+*keypair*.json
+*wallet*.json
+*secret*.txt
+
 __pycache__/
 *.pyc
 logs/

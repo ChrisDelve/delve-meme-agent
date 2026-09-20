@@ -139,6 +139,13 @@ class LiveDeploymentContractTests(unittest.TestCase):
         }
 
         self.assertIn(".env", lines)
+        self.assertIn(".env.*", lines)
+        self.assertIn("!.env.example", lines)
+        self.assertIn("*.key", lines)
+        self.assertIn("*.pem", lines)
+        self.assertIn("*keypair*.json", lines)
+        self.assertIn("*wallet*.json", lines)
+        self.assertIn("*secret*.txt", lines)
         self.assertIn("logs/", lines)
 
 

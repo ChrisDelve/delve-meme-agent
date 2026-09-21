@@ -735,6 +735,9 @@ async def listen(
 
     print("=" * 70)
 
+    reconnect_delay_seconds = 2.0
+    max_reconnect_delay_seconds = 60.0
+
     while True:
         coverage_interval_id = None
         coverage_last_seen_at = None
@@ -775,6 +778,13 @@ async def listen(
                     raise RuntimeError(
                         response["error"]
                     )
+
+                #
+                # A completed subscription handshake proves
+                # connectivity has recovered. Future disconnects
+                # may begin again at the short initial delay.
+                #
+                reconnect_delay_seconds = 2.0
 
                 coverage_interval_id = (
                     start_coverage_interval()
@@ -933,10 +943,18 @@ async def listen(
                 f"⚠️ Collector error: {error}"
             )
             print(
-                "🔄 Reconnecting in 2 seconds..."
+                "🔄 Reconnecting in "
+                f"{reconnect_delay_seconds:g} seconds..."
             )
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(
+                reconnect_delay_seconds
+            )
+
+            reconnect_delay_seconds = min(
+                reconnect_delay_seconds * 2.0,
+                max_reconnect_delay_seconds,
+            )
 
 async def run_market_collector(
     *,

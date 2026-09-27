@@ -79,10 +79,15 @@ class CoinbaseHeartbeatWireFrame:
     """A recognized heartbeat frame without heartbeat semantic parsing."""
 
     received_at_unix_ns: int
+    sequence_num: int
     raw_text: str
 
     def __post_init__(self) -> None:
         _validate_wire_fields(self.received_at_unix_ns, self.raw_text)
+        if type(self.sequence_num) is not int:
+            raise TypeError("sequence_num must be an exact int")
+        if self.sequence_num < 0:
+            raise ValueError("sequence_num must be nonnegative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,8 +132,18 @@ def route_public_wire_message(
             product_ids=_ordered_unique_product_ids(trades),
         )
     if channel == "heartbeats":
+        if "sequence_num" not in message:
+            raise CoinbasePublicMessageRoutingError(
+                "recognized heartbeat sequence_num is missing"
+            )
+        heartbeat_sequence_num = message["sequence_num"]
+        if type(heartbeat_sequence_num) is not int or heartbeat_sequence_num < 0:
+            raise CoinbasePublicMessageRoutingError(
+                "recognized heartbeat sequence_num must be a nonnegative exact int"
+            )
         return CoinbaseHeartbeatWireFrame(
             received_at_unix_ns=wire_message.received_at_unix_ns,
+            sequence_num=heartbeat_sequence_num,
             raw_text=wire_message.raw_text,
         )
     return CoinbaseIgnoredPublicFrame(

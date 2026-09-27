@@ -154,11 +154,62 @@ class CoinbasePublicMessageRouterTests(unittest.TestCase):
                 )
 
     def test_heartbeat_routes_separately_and_preserves_exact_wire_values(self):
-        raw_text = '  {"channel":"heartbeats","heartbeat_counter":"7"}\n'
+        raw_text = (
+            '  {"channel":"heartbeats","sequence_num":77,'
+            '"heartbeat_counter":"7"}\n'
+        )
         result = route_public_wire_message(
             CoinbasePublicWireMessage(101, raw_text)
         )
-        self.assertEqual(result, CoinbaseHeartbeatWireFrame(101, raw_text))
+        self.assertEqual(
+            result,
+            CoinbaseHeartbeatWireFrame(
+                received_at_unix_ns=101,
+                sequence_num=77,
+                raw_text=raw_text,
+            ),
+        )
+        self.assertEqual(result.received_at_unix_ns, 101)
+        self.assertEqual(result.sequence_num, 77)
+        self.assertEqual(result.raw_text, raw_text)
+
+    def test_zero_is_a_valid_heartbeat_sequence(self):
+        result = route_public_wire_message(
+            self.wire({"channel": "heartbeats", "sequence_num": 0})
+        )
+        self.assertEqual(result.sequence_num, 0)
+
+    def test_direct_heartbeat_rejects_invalid_sequence_values(self):
+        for sequence_num in (True, False, -1, 1.0, "1", None):
+            with self.subTest(sequence_num=sequence_num), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                CoinbaseHeartbeatWireFrame(
+                    received_at_unix_ns=1,
+                    sequence_num=sequence_num,
+                    raw_text='{"channel":"heartbeats"}',
+                )
+
+    def test_recognized_heartbeat_requires_sequence_num(self):
+        with self.assertRaisesRegex(
+            CoinbasePublicMessageRoutingError,
+            "sequence_num is missing",
+        ):
+            route_public_wire_message(self.wire({"channel": "heartbeats"}))
+
+    def test_recognized_heartbeat_rejects_invalid_sequence_num(self):
+        for sequence_num in (True, False, -1, 1.0, "1", None):
+            with self.subTest(sequence_num=sequence_num), self.assertRaises(
+                CoinbasePublicMessageRoutingError
+            ):
+                route_public_wire_message(
+                    self.wire(
+                        {
+                            "channel": "heartbeats",
+                            "sequence_num": sequence_num,
+                        }
+                    )
+                )
 
     def test_unsupported_and_control_messages_are_ignored(self):
         for message in (
@@ -198,7 +249,7 @@ class CoinbasePublicMessageRouterTests(unittest.TestCase):
     def test_result_objects_are_immutable(self):
         market = route_public_wire_message(self.wire(self.market_message()))
         heartbeat = route_public_wire_message(
-            self.wire({"channel": "heartbeats"})
+            self.wire({"channel": "heartbeats", "sequence_num": 5})
         )
         ignored = route_public_wire_message(self.wire({"channel": "ticker"}))
 
@@ -211,19 +262,24 @@ class CoinbasePublicMessageRouterTests(unittest.TestCase):
                 setattr(result, field_name, replacement)
 
     def test_wire_result_direct_construction_validates_fields(self):
-        for result_type in (CoinbaseHeartbeatWireFrame, CoinbaseIgnoredPublicFrame):
-            for timestamp, raw_text in (
-                (True, "{}"),
-                (-1, "{}"),
-                (1, b"{}"),
-                (1, ""),
-            ):
-                with self.subTest(
-                    result_type=result_type,
-                    timestamp=timestamp,
-                    raw_text=raw_text,
-                ), self.assertRaises((TypeError, ValueError)):
-                    result_type(timestamp, raw_text)
+        for timestamp, raw_text in (
+            (True, "{}"),
+            (-1, "{}"),
+            (1, b"{}"),
+            (1, ""),
+        ):
+            with self.subTest(
+                result_type=CoinbaseHeartbeatWireFrame,
+                timestamp=timestamp,
+                raw_text=raw_text,
+            ), self.assertRaises((TypeError, ValueError)):
+                CoinbaseHeartbeatWireFrame(timestamp, 1, raw_text)
+            with self.subTest(
+                result_type=CoinbaseIgnoredPublicFrame,
+                timestamp=timestamp,
+                raw_text=raw_text,
+            ), self.assertRaises((TypeError, ValueError)):
+                CoinbaseIgnoredPublicFrame(timestamp, raw_text)
 
 
 if __name__ == "__main__":
